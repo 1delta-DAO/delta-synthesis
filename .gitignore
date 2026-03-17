@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+
+# Foundry
+packages/contracts/out/
+packages/contracts/cache/
+
+# IDE
+.vscode/
+.idea/
