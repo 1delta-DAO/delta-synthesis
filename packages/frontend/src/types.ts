@@ -16,12 +16,12 @@ export interface TokenSelection {
   debt: boolean      // vToken
 }
 
+/** fork → underlying → TokenSelection */
+export type AaveSelection = Record<string, Record<string, TokenSelection>>
+
 export interface SelectionState {
   chainId: string
-  aave: {
-    fork: string
-    tokens: Record<string, TokenSelection> // underlying address → selection
-  }
+  aave: AaveSelection
   morpho: {
     pools: string[] // "POOL_TYPE:CHAIN_ID" keys
   }
