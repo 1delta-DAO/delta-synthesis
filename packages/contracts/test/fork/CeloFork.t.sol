@@ -49,7 +49,7 @@ interface ICreditDelegation {
  */
 contract CeloForkTest is Test {
     address constant AAVE_V3_POOL = 0x3E59A31363E2ad014dcbc521c4a0d5757d9f3402;
-    address constant UNISWAP_V3_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+
 
     address constant CELO = 0x471EcE3750Da237f93B8E339c536989b8978a438;
     address constant CUSD = 0x765DE816845861e75A25fCA122bb6898B8B1282a;
@@ -60,7 +60,7 @@ contract CeloForkTest is Test {
     address constant REPUTATION_REGISTRY = 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63;
 
     bytes32 constant VERATO_ORDER_TYPEHASH =
-        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,bytes settlementData)");
+        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,uint256 minSolverReputation,bytes settlementData)");
 
     IVerato verato;
     address user;
@@ -79,9 +79,9 @@ contract CeloForkTest is Test {
         for (uint256 i; i < proof.length; i++) r = abi.encodePacked(r, proof[i]);
         return r;
     }
-    function _signOrder(uint256 pk, bytes32 root, uint48 deadline, uint256 maxFee, address solver, bytes memory sd) internal view returns (bytes memory) {
+    function _signOrder(uint256 pk, bytes32 root, uint48 deadline, uint256 maxFee, address solver, uint256 minSolverRep, bytes memory sd) internal view returns (bytes memory) {
         bytes32 ds = verato.DOMAIN_SEPARATOR();
-        bytes32 sh = keccak256(abi.encode(VERATO_ORDER_TYPEHASH, root, deadline, maxFee, solver, keccak256(sd)));
+        bytes32 sh = keccak256(abi.encode(VERATO_ORDER_TYPEHASH, root, deadline, maxFee, solver, minSolverRep, keccak256(sd)));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", ds, sh));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -97,7 +97,7 @@ contract CeloForkTest is Test {
 
         (user, userPk) = makeAddrAndKey("celoUser");
 
-        bytes memory args = abi.encode(IDENTITY_REGISTRY, REPUTATION_REGISTRY, UNISWAP_V3_ROUTER, CELO);
+        bytes memory args = abi.encode(IDENTITY_REGISTRY, REPUTATION_REGISTRY);
         bytes memory bc = abi.encodePacked(vm.getCode("out/Verato.sol/Verato.json"), args);
         address d; assembly { d := create(0, add(bc, 0x20), mload(bc)) }
         require(d != address(0)); verato = IVerato(d);
@@ -140,11 +140,10 @@ contract CeloForkTest is Test {
             _action(WETH, 0, user, 0, 0, dd, p1));
 
         uint48 dl = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), hex"");
-        vm.prank(user); verato.setUserSolverTrust(address(this), true);
-
+        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), 0, hex"");
+        
         uint256 before = IERC20(aWETH).balanceOf(user);
-        verato.settle(0, address(0), dl, sig, od, ed, hex"");
+        verato.settle(0, address(0), 0, dl, sig, od, ed, hex"");
         uint256 after_ = IERC20(aWETH).balanceOf(user);
 
         assertApproxEqRel(after_, before, 1e15, "aWETH preserved");
@@ -166,10 +165,9 @@ contract CeloForkTest is Test {
             _action(WETH, type(uint112).max, address(verato), 3, 0, wd, p0),
             _action(WETH, 0, user, 0, 0, dd, p1));
         uint48 dl = uint48(block.timestamp - 1);
-        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), hex"");
-        vm.prank(user); verato.setUserSolverTrust(address(this), true);
-        vm.expectRevert(bytes4(keccak256("OrderExpired()")));
-        verato.settle(0, address(0), dl, sig, od, ed, hex"");
+        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), 0, hex"");
+                vm.expectRevert(bytes4(keccak256("OrderExpired()")));
+        verato.settle(0, address(0), 0, dl, sig, od, ed, hex"");
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -186,10 +184,9 @@ contract CeloForkTest is Test {
             _action(WETH, type(uint112).max, address(verato), 3, 0, wd, bad),
             _action(WETH, 0, user, 0, 0, dd, p1));
         uint48 dl = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), hex"");
-        vm.prank(user); verato.setUserSolverTrust(address(this), true);
-        vm.expectRevert(bytes4(keccak256("InvalidMerkleProof()")));
-        verato.settle(0, address(0), dl, sig, od, ed, hex"");
+        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), 0, hex"");
+                vm.expectRevert(bytes4(keccak256("InvalidMerkleProof()")));
+        verato.settle(0, address(0), 0, dl, sig, od, ed, hex"");
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -212,10 +209,9 @@ contract CeloForkTest is Test {
             _action(WETH, 0, user, 0, 0, dd, p1));
 
         uint48 dl = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), sp);
-        vm.prank(user); verato.setUserSolverTrust(address(this), true);
-
-        verato.settle(0, address(0), dl, sig, od, ed, hex"");
+        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), 0, sp);
+        
+        verato.settle(0, address(0), 0, dl, sig, od, ed, hex"");
 
         (,,,,, uint256 hf) = IAaveV3Pool(AAVE_V3_POOL).getUserAccountData(user);
         assertEq(hf, type(uint256).max, "no debt = max HF");
@@ -251,10 +247,9 @@ contract CeloForkTest is Test {
             _action(WETH, 0, user, 0, 0, dd, p1));
 
         uint48 dl = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), sp);
-        vm.prank(user); verato.setUserSolverTrust(address(this), true);
-
-        verato.settle(0, address(0), dl, sig, od, ed, hex"");
+        bytes memory sig = _signOrder(userPk, root, dl, 0, address(0), 0, sp);
+        
+        verato.settle(0, address(0), 0, dl, sig, od, ed, hex"");
 
         (,,,,, uint256 hfAfter) = IAaveV3Pool(AAVE_V3_POOL).getUserAccountData(user);
         assertGt(hfAfter, 1.1e18, "HF above 1.1");

@@ -13,32 +13,32 @@ import {SettlementForwarder} from "../SettlementForwarder.sol";
 import {SettlementExecutor} from "../SettlementExecutor.sol";
 import {IIdentityRegistry} from "../../../interfaces/IIdentityRegistry.sol";
 import {IReputationRegistry} from "../../../interfaces/IReputationRegistry.sol";
-import {ISwapRouter} from "../../../interfaces/ISwapRouter.sol";
 
 /**
  * @title Verato
- * @notice Unified Celo contract for autonomous agent-managed lending positions.
- *         Combines EIP-712 settlement (flash loans, oracle-verified swaps,
- *         multi-protocol lending) with agent permissioning, fee collection,
- *         and ERC-8004 reputation gating.
+ * @notice Autonomous lending-position settlement on Celo.
  *
- *  ════════════════════════════════════════════════════════════════════════════
- *   AGENT PERMISSIONING
- *  ════════════════════════════════════════════════════════════════════════════
+ *  Users sign EIP-712 orders that commit to:
+ *    - A Merkle root of allowed lending operations (deposit, borrow, repay, withdraw)
+ *    - Oracle-verified swap conversions with user-signed slippage tolerance
+ *    - Post-settlement health-factor conditions per touched protocol
+ *    - A maximum fee the solver may extract from borrow surplus
+ *    - Solver trust requirements (direct address + reputation threshold)
  *
- *  Users grant agents permission to manage their positions via:
- *    - Direct address trust: authoriseAgent(address)
- *    - ERC-8004 identity trust: authoriseAgentId(uint256) + trust policy
+ *  Solvers (agents) execute these orders via settle() or settleWithFlashLoan().
+ *  Trust is fully embedded in the signed order — no storage-based permissioning:
  *
- *  Agents earn fees (0.10%) on operations and can swap them to CELO
- *  via Uniswap V3 to self-fund gas.
+ *    solver = address(0), minSolverReputation = 0   → permissionless
+ *    solver = address(0), minSolverReputation = 500 → any solver with rep ≥ 500
+ *    solver = 0xABC,      minSolverReputation = 0   → direct trust (only 0xABC)
+ *    solver = 0xABC,      minSolverReputation = 500 → 0xABC AND rep ≥ 500
  *
- *  ════════════════════════════════════════════════════════════════════════════
- *   REPUTATION-GATED SETTLEMENT
- *  ════════════════════════════════════════════════════════════════════════════
+ *  The contract owner may set a global minReputation floor that applies
+ *  regardless of what orders specify (effective min = max(order, global)).
  *
- *  Solvers executing EIP-712 signed orders must meet on-chain reputation
- *  thresholds from the Celo ERC-8004 registries before any settlement runs.
+ *  Solver identity is backed by Celo ERC-8004 registries:
+ *    - identityRegistry: NFT ownership proves on-chain identity
+ *    - reputationRegistry: on-chain reputation score per agentId
  */
 contract Verato is
     MorphoFlashLoans,
@@ -48,34 +48,10 @@ contract Verato is
     HealthFactorChecker
 {
     // ═════════════════════════════════════════════════════════════════════════
-    //  Types
-    // ═════════════════════════════════════════════════════════════════════════
-
-    struct Position {
-        uint256 deposited;
-        uint256 borrowed;
-    }
-
-    struct TrustPolicy {
-        bool requireRegistered;
-        uint256 minReputation;
-    }
-
-    struct AgentScore {
-        uint256 opsSettled;
-        uint256 opsReverted;
-        uint256 feesEarned;
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
     //  Constants
     // ═════════════════════════════════════════════════════════════════════════
 
-    uint256 public constant FEE_BPS = 10; // 0.10%
-    uint256 public constant BPS = 10_000;
-
     /// @dev Morpho Blue canonical CREATE2 address.
-    ///      Verify on Celo: https://celoscan.io/address/0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb
     address internal constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -85,37 +61,20 @@ contract Verato is
     SettlementForwarder public immutable forwarder;
     IIdentityRegistry public immutable identityRegistry;
     IReputationRegistry public immutable reputationRegistry;
-    ISwapRouter public immutable swapRouter;
-    address public immutable nativeToken; // CELO ERC-20
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  State — ownership
+    //  State
     // ═════════════════════════════════════════════════════════════════════════
 
     address public owner;
 
-    // ═════════════════════════════════════════════════════════════════════════
-    //  State — agent permissioning (user-facing)
-    // ═════════════════════════════════════════════════════════════════════════
-
-    mapping(address => mapping(address => bool)) public authorisedAgents;
-    mapping(address => mapping(uint256 => bool)) public authorisedAgentIds;
-    mapping(address => TrustPolicy) public trustPolicies;
-    mapping(address => uint256) public agentIdOf;
-    mapping(address => bool) public hasLinkedId;
-    mapping(address => mapping(address => Position)) public positions;
-    mapping(address => mapping(address => uint256)) public agentFees;
-    mapping(address => mapping(address => AgentScore)) public agentScores;
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  State — solver reputation gating (settlement-facing)
-    // ═════════════════════════════════════════════════════════════════════════
-
+    /// @notice Global reputation floor. Effective minimum for any order is
+    ///         max(order.minSolverReputation, minReputation).
     uint256 public minReputation;
+
+    /// @notice Solver address → linked ERC-8004 agent ID.
     mapping(address => uint256) public solverAgentId;
     mapping(address => bool) public solverLinked;
-    mapping(address => mapping(address => bool)) public userDirectTrust;
-    mapping(address => uint256) public userMinReputation;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  Events
@@ -123,34 +82,12 @@ contract Verato is
 
     event OwnershipTransferred(address indexed prev, address indexed next);
     event MinReputationUpdated(uint256 newMin);
-    event AgentAuthorised(address indexed owner, address indexed agent);
-    event AgentRevoked(address indexed owner, address indexed agent);
-    event AgentIdAuthorised(address indexed owner, uint256 indexed agentId);
-    event AgentIdRevoked(address indexed owner, uint256 indexed agentId);
-    event TrustPolicyUpdated(address indexed owner, bool requireRegistered, uint256 minReputation);
-    event AgentLinked(address indexed agent, uint256 indexed agentId);
-    event Deposit(address indexed user, address indexed token, uint256 amount);
-    event Withdraw(address indexed user, address indexed token, uint256 amount);
-    event Borrow(address indexed user, address indexed token, uint256 amount);
-    event Repay(address indexed user, address indexed token, uint256 amount);
-    event FeeCollected(address indexed agent, address indexed token, uint256 fee);
-    event FeesClaimed(address indexed agent, address indexed token, uint256 amount);
-    event FeesSwappedToNative(address indexed agent, address indexed tokenIn, uint256 amountIn, uint256 amountOut);
-    event OpDisputed(address indexed user, address indexed agent);
     event SolverLinked(address indexed solver, uint256 indexed agentId);
-    event UserDirectTrustSet(address indexed user, address indexed solver, bool trusted);
-    event UserMinReputationSet(address indexed user, uint256 minRep);
 
     // ═════════════════════════════════════════════════════════════════════════
     //  Errors
     // ═════════════════════════════════════════════════════════════════════════
 
-    error Unauthorised();
-    error InsufficientBalance();
-    error ZeroAmount();
-    error AgentNotRegistered();
-    error ReputationTooLow();
-    error NoFeesToClaim();
     error ConversionMismatch();
     error UnsupportedConditionLender();
     error OnlyOwner();
@@ -164,14 +101,10 @@ contract Verato is
 
     constructor(
         address _identityRegistry,
-        address _reputationRegistry,
-        address _swapRouter,
-        address _nativeToken
+        address _reputationRegistry
     ) {
         identityRegistry = IIdentityRegistry(_identityRegistry);
         reputationRegistry = IReputationRegistry(_reputationRegistry);
-        swapRouter = ISwapRouter(_swapRouter);
-        nativeToken = _nativeToken;
         owner = msg.sender;
         forwarder = new SettlementForwarder(address(this));
     }
@@ -194,6 +127,8 @@ contract Verato is
         owner = newOwner;
     }
 
+    /// @notice Set the global reputation floor. Orders whose minSolverReputation
+    ///         is below this value will use this floor instead.
     function setMinReputation(uint256 _minReputation) external {
         if (msg.sender != owner) revert OnlyOwner();
         minReputation = _minReputation;
@@ -201,134 +136,11 @@ contract Verato is
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  Agent permissioning (user-facing)
+    //  Solver identity linking
     // ═════════════════════════════════════════════════════════════════════════
 
-    modifier onlyAuthorised(address user) {
-        if (msg.sender != user) {
-            _checkAuthorised(user, msg.sender);
-        }
-        _;
-    }
-
-    function setTrustPolicy(bool requireRegistered, uint256 _minReputation) external {
-        trustPolicies[msg.sender] = TrustPolicy(requireRegistered, _minReputation);
-        emit TrustPolicyUpdated(msg.sender, requireRegistered, _minReputation);
-    }
-
-    function authoriseAgent(address agent) external {
-        authorisedAgents[msg.sender][agent] = true;
-        emit AgentAuthorised(msg.sender, agent);
-    }
-
-    function revokeAgent(address agent) external {
-        authorisedAgents[msg.sender][agent] = false;
-        emit AgentRevoked(msg.sender, agent);
-    }
-
-    function authoriseAgentId(uint256 agentId) external {
-        authorisedAgentIds[msg.sender][agentId] = true;
-        emit AgentIdAuthorised(msg.sender, agentId);
-    }
-
-    function revokeAgentId(uint256 agentId) external {
-        authorisedAgentIds[msg.sender][agentId] = false;
-        emit AgentIdRevoked(msg.sender, agentId);
-    }
-
-    function linkAgentId(uint256 agentId) external {
-        if (identityRegistry.balanceOf(msg.sender) == 0) revert AgentNotRegistered();
-        agentIdOf[msg.sender] = agentId;
-        hasLinkedId[msg.sender] = true;
-        emit AgentLinked(msg.sender, agentId);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  Position management — fee-bearing (agent-facing)
-    // ═════════════════════════════════════════════════════════════════════════
-
-    function deposit(address user, address token, uint256 amount) external onlyAuthorised(user) {
-        if (amount == 0) revert ZeroAmount();
-        IERC20(token).transferFrom(user, address(this), amount);
-        uint256 fee = _collectFee(user, token, amount);
-        positions[user][token].deposited += (amount - fee);
-        emit Deposit(user, token, amount - fee);
-    }
-
-    function withdraw(address user, address token, uint256 amount) external onlyAuthorised(user) {
-        if (amount == 0) revert ZeroAmount();
-        if (positions[user][token].deposited < amount) revert InsufficientBalance();
-        positions[user][token].deposited -= amount;
-        uint256 fee = _collectFee(user, token, amount);
-        IERC20(token).transfer(user, amount - fee);
-        emit Withdraw(user, token, amount - fee);
-    }
-
-    function borrow(address user, address token, uint256 amount) external onlyAuthorised(user) {
-        if (amount == 0) revert ZeroAmount();
-        positions[user][token].borrowed += amount;
-        uint256 fee = _collectFee(user, token, amount);
-        IERC20(token).transfer(user, amount - fee);
-        emit Borrow(user, token, amount - fee);
-    }
-
-    function repay(address user, address token, uint256 amount) external onlyAuthorised(user) {
-        if (amount == 0) revert ZeroAmount();
-        if (positions[user][token].borrowed < amount) revert InsufficientBalance();
-        IERC20(token).transferFrom(user, address(this), amount);
-        uint256 fee = _collectFee(user, token, amount);
-        positions[user][token].borrowed -= (amount - fee);
-        emit Repay(user, token, amount - fee);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  Success criteria — dispute mechanism
-    // ═════════════════════════════════════════════════════════════════════════
-
-    function disputeAgent(address agent) external {
-        agentScores[msg.sender][agent].opsReverted += 1;
-        emit OpDisputed(msg.sender, agent);
-    }
-
-    function agentSuccessRate(address user, address agent) external view returns (uint256) {
-        AgentScore memory s = agentScores[user][agent];
-        if (s.opsSettled == 0) return BPS;
-        return ((s.opsSettled - s.opsReverted) * BPS) / s.opsSettled;
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  Fee claims & swap-to-native
-    // ═════════════════════════════════════════════════════════════════════════
-
-    function claimFees(address token) external {
-        uint256 amount = agentFees[msg.sender][token];
-        if (amount == 0) revert NoFeesToClaim();
-        agentFees[msg.sender][token] = 0;
-        IERC20(token).transfer(msg.sender, amount);
-        emit FeesClaimed(msg.sender, token, amount);
-    }
-
-    function claimFeesAsNative(
-        address token, uint24 poolFee, uint256 minAmountOut
-    ) external returns (uint256 amountOut) {
-        uint256 amount = agentFees[msg.sender][token];
-        if (amount == 0) revert NoFeesToClaim();
-        agentFees[msg.sender][token] = 0;
-        IERC20(token).approve(address(swapRouter), amount);
-        amountOut = swapRouter.exactInputSingle(
-            ISwapRouter.ExactInputSingleParams({
-                tokenIn: token, tokenOut: nativeToken, fee: poolFee,
-                recipient: msg.sender, deadline: block.timestamp,
-                amountIn: amount, amountOutMinimum: minAmountOut, sqrtPriceLimitX96: 0
-            })
-        );
-        emit FeesSwappedToNative(msg.sender, token, amount, amountOut);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    //  Solver trust configuration (settlement-facing)
-    // ═════════════════════════════════════════════════════════════════════════
-
+    /// @notice Solvers call this to link their address to an ERC-8004 agent ID.
+    ///         Required before executing orders that set minSolverReputation > 0.
     function linkSolverAgentId(uint256 agentId) external {
         if (identityRegistry.balanceOf(msg.sender) == 0) revert SolverNotRegistered();
         solverAgentId[msg.sender] = agentId;
@@ -336,38 +148,30 @@ contract Verato is
         emit SolverLinked(msg.sender, agentId);
     }
 
-    function setUserSolverTrust(address solver, bool trusted) external {
-        userDirectTrust[msg.sender][solver] = trusted;
-        emit UserDirectTrustSet(msg.sender, solver, trusted);
-    }
-
-    function setUserMinReputation(uint256 _minReputation) external {
-        userMinReputation[msg.sender] = _minReputation;
-        emit UserMinReputationSet(msg.sender, _minReputation);
-    }
-
     // ═════════════════════════════════════════════════════════════════════════
-    //  Settlement entry points (reputation-gated)
+    //  Settlement entry points
     // ═════════════════════════════════════════════════════════════════════════
 
+    /// @notice Execute a signed settlement order directly (no flash loan).
     function settle(
-        uint256 maxFeeBps, address solver, uint48 deadline,
+        uint256 maxFeeBps, address solver, uint256 minSolverReputation, uint48 deadline,
         bytes calldata signature, bytes calldata orderData,
         bytes calldata executionData, bytes calldata fillerCalldata
     ) external {
-        (address user,) = _verifyAndExtract(maxFeeBps, solver, deadline, signature, orderData);
-        _checkSolverReputation(user, msg.sender);
+        (address user,) = _verifyAndExtract(maxFeeBps, solver, minSolverReputation, deadline, signature, orderData);
+        _checkSolverReputation(msg.sender, minSolverReputation);
         _executeSettlement(user, maxFeeBps, orderData, executionData, fillerCalldata);
     }
 
+    /// @notice Execute a signed settlement order using a Morpho Blue flash loan.
     function settleWithFlashLoan(
         address flashLoanAsset, uint256 flashLoanAmount, address flashLoanPool, uint8 poolId,
-        uint256 maxFeeBps, address solver, uint48 deadline,
+        uint256 maxFeeBps, address solver, uint256 minSolverReputation, uint48 deadline,
         bytes calldata signature, bytes calldata orderData,
         bytes calldata executionData, bytes calldata fillerCalldata
     ) external {
-        (address user,) = _verifyAndExtract(maxFeeBps, solver, deadline, signature, orderData);
-        _checkSolverReputation(user, msg.sender);
+        (address user,) = _verifyAndExtract(maxFeeBps, solver, minSolverReputation, deadline, signature, orderData);
+        _checkSolverReputation(msg.sender, minSolverReputation);
         uint256 paramsLen = 1 + 8 + 2 + orderData.length + 2 + fillerCalldata.length + executionData.length;
         bytes memory fullData = abi.encodePacked(
             flashLoanPool, uint16(paramsLen), poolId, uint64(maxFeeBps),
@@ -382,7 +186,7 @@ contract Verato is
     // ═════════════════════════════════════════════════════════════════════════
 
     function _verifyAndExtract(
-        uint256 maxFeeBps, address solver, uint48 deadline,
+        uint256 maxFeeBps, address solver, uint256 minSolverReputation, uint48 deadline,
         bytes calldata signature, bytes calldata orderData
     ) internal view returns (address user, bytes32 merkleRoot) {
         bytes memory settlementData;
@@ -395,7 +199,7 @@ contract Verato is
             calldatacopy(add(fmp, 0x20), add(orderData.offset, 34), sLen)
             mstore(0x40, add(add(fmp, 0x20), and(add(sLen, 31), not(31))))
         }
-        user = _recoverOrderSigner(merkleRoot, deadline, maxFeeBps, solver, settlementData, signature);
+        user = _recoverOrderSigner(merkleRoot, deadline, maxFeeBps, solver, minSolverReputation, settlementData, signature);
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -551,54 +355,20 @@ contract Verato is
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    //  Internal — agent auth
-    // ═════════════════════════════════════════════════════════════════════════
-
-    function _checkAuthorised(address user, address caller) internal view {
-        if (authorisedAgents[user][caller]) return;
-        if (hasLinkedId[caller]) {
-            uint256 agentId = agentIdOf[caller];
-            if (authorisedAgentIds[user][agentId]) {
-                _enforceTrustPolicy(trustPolicies[user], caller, agentId);
-                return;
-            }
-        }
-        revert Unauthorised();
-    }
-
-    function _enforceTrustPolicy(TrustPolicy memory policy, address caller, uint256 agentId) internal view {
-        if (policy.requireRegistered) {
-            if (identityRegistry.balanceOf(caller) == 0) revert AgentNotRegistered();
-        }
-        if (policy.minReputation > 0) {
-            IReputationRegistry.Summary memory summary = reputationRegistry.getSummary(agentId);
-            if (summary.averageScore < policy.minReputation) revert ReputationTooLow();
-        }
-    }
-
-    function _collectFee(address user, address token, uint256 amount) internal returns (uint256 fee) {
-        if (msg.sender == user) return 0;
-        fee = (amount * FEE_BPS) / BPS;
-        agentFees[msg.sender][token] += fee;
-        agentScores[user][msg.sender].opsSettled += 1;
-        agentScores[user][msg.sender].feesEarned += fee;
-        emit FeeCollected(msg.sender, token, fee);
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
     //  Internal — solver reputation
     // ═════════════════════════════════════════════════════════════════════════
 
-    function _checkSolverReputation(address user, address solver) internal view {
-        if (userDirectTrust[user][solver]) return;
+    /// @notice Checks solver reputation using the order-embedded threshold.
+    ///         When the effective minimum (max of order and global) is 0,
+    ///         the check is skipped — the user trusts any solver (or trusts
+    ///         the specific solver named in the order's `solver` field).
+    function _checkSolverReputation(address solver, uint256 orderMinReputation) internal view {
+        uint256 required = orderMinReputation > minReputation ? orderMinReputation : minReputation;
+        if (required == 0) return;
         if (!solverLinked[solver]) revert SolverNotLinked();
         if (identityRegistry.balanceOf(solver) == 0) revert SolverNotRegistered();
-        uint256 required = userMinReputation[user];
-        if (required == 0) required = minReputation;
-        if (required > 0) {
-            uint256 agentId = solverAgentId[solver];
-            IReputationRegistry.Summary memory summary = reputationRegistry.getSummary(agentId);
-            if (summary.averageScore < required) revert SolverReputationTooLow();
-        }
+        uint256 agentId = solverAgentId[solver];
+        IReputationRegistry.Summary memory summary = reputationRegistry.getSummary(agentId);
+        if (summary.averageScore < required) revert SolverReputationTooLow();
     }
 }

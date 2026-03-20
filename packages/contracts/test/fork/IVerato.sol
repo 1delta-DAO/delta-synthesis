@@ -10,14 +10,14 @@ interface IVerato {
 
     // Settlement
     function settle(
-        uint256 maxFeeBps, address solver, uint48 deadline,
+        uint256 maxFeeBps, address solver, uint256 minSolverReputation, uint48 deadline,
         bytes calldata signature, bytes calldata orderData,
         bytes calldata executionData, bytes calldata fillerCalldata
     ) external;
 
     function settleWithFlashLoan(
         address flashLoanAsset, uint256 flashLoanAmount, address flashLoanPool, uint8 poolId,
-        uint256 maxFeeBps, address solver, uint48 deadline,
+        uint256 maxFeeBps, address solver, uint256 minSolverReputation, uint48 deadline,
         bytes calldata signature, bytes calldata orderData,
         bytes calldata executionData, bytes calldata fillerCalldata
     ) external;
@@ -25,10 +25,8 @@ interface IVerato {
     // Token approvals
     function approveToken(address token, address spender, uint256 amount) external;
 
-    // Solver trust
-    function setUserSolverTrust(address solver, bool trusted) external;
+    // Solver identity
     function linkSolverAgentId(uint256 agentId) external;
-    function setUserMinReputation(uint256 _minReputation) external;
 
     // Agent management
     function authoriseAgent(address agent) external;

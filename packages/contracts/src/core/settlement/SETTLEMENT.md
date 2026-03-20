@@ -29,11 +29,12 @@ Solver calls settle() or settleWithFlashLoan()
 
 ```solidity
 VeratoOrder(
-    bytes32 merkleRoot,    // Commits to all allowed lending operations
-    uint48  deadline,      // Expiry, also serves as nonce for bulk cancellation
-    uint256 maxFeeBps,     // Max fee (1e7 denominator: 50000 = 0.5%)
-    address solver,        // Restricted solver, or address(0) = permissionless
-    bytes   settlementData // Packed conversions + conditions (see below)
+    bytes32 merkleRoot,           // Commits to all allowed lending operations
+    uint48  deadline,             // Expiry, also serves as nonce for bulk cancellation
+    uint256 maxFeeBps,            // Max fee (1e7 denominator: 50000 = 0.5%)
+    address solver,               // Restricted solver, or address(0) = permissionless
+    uint256 minSolverReputation,  // Min ERC-8004 reputation, or 0 = no check
+    bytes   settlementData        // Packed conversions + conditions (see below)
 )
 ```
 
@@ -127,43 +128,41 @@ settleWithFlashLoan()
 
 On Celo, Morpho Blue is the flash loan source.
 
-## Celo-Specific: Agent Trust
+## Solver Trust Model
 
-### Direct Trust
+Trust is **fully embedded in the signed EIP-712 order** — no storage-based permissioning needed.
+The `solver` and `minSolverReputation` fields together express the user's trust requirements:
+
+| solver | minSolverReputation | Meaning |
+|--------|---------------------|---------|
+| `address(0)` | `0` | Permissionless — anyone can settle |
+| `address(0)` | `500` | Any solver with reputation ≥ 500 |
+| `0xABC` | `0` | Direct trust — only 0xABC, no reputation check |
+| `0xABC` | `500` | Only 0xABC AND must have reputation ≥ 500 |
+
+### Global reputation floor
+
+The contract owner can set `minReputation` — a global floor that applies regardless of
+what individual orders specify. The effective minimum for any order is:
+
+```
+effective = max(order.minSolverReputation, global minReputation)
+```
+
+If effective is 0, the reputation check is skipped entirely.
+
+### Solver identity (ERC-8004)
+
+Solvers must link their address to an on-chain identity before executing reputation-gated orders:
+
 ```solidity
-authoriseAgent(address agent)   // Whitelist by address
-revokeAgent(address agent)
+linkSolverAgentId(uint256 agentId)  // Requires identityRegistry.balanceOf(solver) > 0
 ```
 
-### Identity-Based Trust (ERC-8004)
-```solidity
-authoriseAgentId(uint256 agentId)  // Trust by on-chain identity
-setTrustPolicy(TrustPolicy policy) // requireRegistered or minReputation
-setMinReputation(uint256 minRep)
-```
-
-Agents link their identity via `linkAgentId(agentId)` and must hold the identity NFT.
-
-### Solver Reputation Gating
-```solidity
-setUserSolverTrust(solver, true)      // Direct trust (skips reputation)
-linkSolverAgentId(uint256 agentId)    // Link solver identity
-userMinReputation[user] = threshold   // Per-user reputation floor
-```
-
-Before settlement, `_checkSolverReputation()` verifies the solver meets the user's trust requirements.
-
-### Agent Fees
-- 0.10% fee on all position operations (configurable via `FEE_BPS`)
-- Fees tracked per agent/token in `agentFees[agent][token]`
-- Agents can `claimFeesAsNative()` to swap fees to CELO via Uniswap
-
-### Success Tracking
-```
-agentScores[user][agent].opsSettled   // Total operations
-agentScores[user][agent].opsReverted  // Disputed operations
-agentScores[user][agent].feesEarned   // Total fees collected
-```
+When `effective > 0`, settlement checks:
+1. `solverLinked[solver]` — solver has linked an agentId
+2. `identityRegistry.balanceOf(solver) > 0` — solver holds an identity NFT
+3. `reputationRegistry.getSummary(agentId).averageScore ≥ effective` — meets reputation threshold
 
 ## Migration Example: Moola → Aave V3
 

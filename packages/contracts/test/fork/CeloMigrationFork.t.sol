@@ -57,7 +57,7 @@ contract CeloMigrationForkTest is Test {
     // ── Celo mainnet protocols (from 1delta lender-metadata) ──
     address constant AAVE_V3_POOL = 0x3E59A31363E2ad014dcbc521c4a0d5757d9f3402;
     address constant MOOLA_POOL   = 0x970b12522CA9b4054807a2c5B736149a5BE6f670;
-    address constant UNISWAP_V3   = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+
 
     // ── Celo mainnet tokens ──────────────────────────────────
     address constant CELO = 0x471EcE3750Da237f93B8E339c536989b8978a438;
@@ -69,7 +69,7 @@ contract CeloMigrationForkTest is Test {
     address constant REPUTATION_REGISTRY = 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63;
 
     bytes32 constant VERATO_ORDER_TYPEHASH =
-        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,bytes settlementData)");
+        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,uint256 minSolverReputation,bytes settlementData)");
 
     IVerato verato;
     address user;
@@ -109,11 +109,11 @@ contract CeloMigrationForkTest is Test {
 
     function _signOrder(
         uint256 pk, bytes32 merkleRoot, uint48 deadline,
-        uint256 maxFeeBps, address solver, bytes memory settlementPayload
+        uint256 maxFeeBps, address solver, uint256 minSolverRep, bytes memory settlementPayload
     ) internal view returns (bytes memory) {
         bytes32 domainSeparator = verato.DOMAIN_SEPARATOR();
         bytes32 structHash = keccak256(
-            abi.encode(VERATO_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, keccak256(settlementPayload))
+            abi.encode(VERATO_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, minSolverRep, keccak256(settlementPayload))
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
@@ -132,7 +132,7 @@ contract CeloMigrationForkTest is Test {
 
         (user, userPk) = makeAddrAndKey("migrationUser");
 
-        bytes memory args = abi.encode(IDENTITY_REGISTRY, REPUTATION_REGISTRY, UNISWAP_V3, CELO);
+        bytes memory args = abi.encode(IDENTITY_REGISTRY, REPUTATION_REGISTRY);
         bytes memory bytecode = abi.encodePacked(vm.getCode("out/Verato.sol/Verato.json"), args);
         address deployed;
         assembly { deployed := create(0, add(bytecode, 0x20), mload(bytecode)) }
@@ -166,8 +166,6 @@ contract CeloMigrationForkTest is Test {
     function test_celoMigration_moolaToAaveV3() public {
         _setupUserOnMoola();
 
-        vm.prank(user);
-        verato.setUserSolverTrust(address(this), true);
 
         uint256 moolaBefore = IERC20(mCUSD_src).balanceOf(user);
 
@@ -196,9 +194,9 @@ contract CeloMigrationForkTest is Test {
         );
 
         uint48 deadline = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(userPk, root, deadline, 0, address(0), hex"");
+        bytes memory sig = _signOrder(userPk, root, deadline, 0, address(0), 0, hex"");
 
-        verato.settle(0, address(0), deadline, sig, orderData, executionData, hex"");
+        verato.settle(0, address(0), 0, deadline, sig, orderData, executionData, hex"");
 
         uint256 moolaAfter = IERC20(mCUSD_src).balanceOf(user);
         uint256 aaveAfter = IERC20(aCUSD_dst).balanceOf(user);
@@ -219,8 +217,6 @@ contract CeloMigrationForkTest is Test {
     function test_celoMigration_wrongSigner_reverts() public {
         _setupUserOnMoola();
 
-        vm.prank(user);
-        verato.setUserSolverTrust(address(this), true);
 
         bytes memory withdrawData = abi.encodePacked(mCUSD_src, MOOLA_POOL);
         bytes memory depositData  = abi.encodePacked(AAVE_V3_POOL);
@@ -244,11 +240,11 @@ contract CeloMigrationForkTest is Test {
         // Sign with wrong key
         (, uint256 wrongPk) = makeAddrAndKey("attacker");
         uint48 deadline = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(wrongPk, root, deadline, 0, address(0), hex"");
+        bytes memory sig = _signOrder(wrongPk, root, deadline, 0, address(0), 0, hex"");
 
         // Wrong signer has no aToken approval → revert
         vm.expectRevert();
-        verato.settle(0, address(0), deadline, sig, orderData, executionData, hex"");
+        verato.settle(0, address(0), 0, deadline, sig, orderData, executionData, hex"");
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -258,8 +254,6 @@ contract CeloMigrationForkTest is Test {
     function test_celoMigration_withHealthFactorCondition() public {
         _setupUserOnMoola();
 
-        vm.prank(user);
-        verato.setUserSolverTrust(address(this), true);
 
         bytes memory withdrawData = abi.encodePacked(mCUSD_src, MOOLA_POOL);
         bytes memory depositData  = abi.encodePacked(AAVE_V3_POOL);
@@ -286,9 +280,9 @@ contract CeloMigrationForkTest is Test {
         );
 
         uint48 deadline = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(userPk, root, deadline, 0, address(0), settlementPayload);
+        bytes memory sig = _signOrder(userPk, root, deadline, 0, address(0), 0, settlementPayload);
 
-        verato.settle(0, address(0), deadline, sig, orderData, executionData, hex"");
+        verato.settle(0, address(0), 0, deadline, sig, orderData, executionData, hex"");
 
         (,,,,, uint256 hf) = IAavePool(AAVE_V3_POOL).getUserAccountData(user);
         assertEq(hf, type(uint256).max, "no debt = max HF");

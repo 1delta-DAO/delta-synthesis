@@ -34,7 +34,7 @@ abstract contract EIP712OrderVerifier {
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     bytes32 internal constant VERATO_ORDER_TYPEHASH =
-        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,bytes settlementData)");
+        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,uint256 minSolverReputation,bytes settlementData)");
 
     constructor() {
         _DOMAIN_SEPARATOR = keccak256(
@@ -67,11 +67,12 @@ abstract contract EIP712OrderVerifier {
         uint48 deadline,
         uint256 maxFeeBps,
         address solver,
+        uint256 minSolverReputation,
         bytes calldata settlementData
     ) external {
         bytes32 dataHash = keccak256(settlementData);
         bytes32 structHash = keccak256(
-            abi.encode(VERATO_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, dataHash)
+            abi.encode(VERATO_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, minSolverReputation, dataHash)
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _DOMAIN_SEPARATOR, structHash));
 
@@ -108,6 +109,7 @@ abstract contract EIP712OrderVerifier {
         uint48 deadline,
         uint256 maxFeeBps,
         address solver,
+        uint256 minSolverReputation,
         bytes memory settlementData,
         bytes memory signature
     ) internal view returns (address signer) {
@@ -116,7 +118,7 @@ abstract contract EIP712OrderVerifier {
         if (solver != address(0) && msg.sender != solver) revert UnauthorizedSolver();
 
         bytes32 structHash = keccak256(
-            abi.encode(VERATO_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, keccak256(settlementData))
+            abi.encode(VERATO_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, minSolverReputation, keccak256(settlementData))
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _DOMAIN_SEPARATOR, structHash));
 

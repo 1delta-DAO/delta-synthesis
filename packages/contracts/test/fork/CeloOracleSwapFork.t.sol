@@ -61,7 +61,7 @@ contract FixedRateSwapper {
 contract CeloOracleSwapForkTest is Test {
     address constant AAVE_V3_POOL = 0x3E59A31363E2ad014dcbc521c4a0d5757d9f3402;
     address constant AAVE_ORACLE  = 0x1e693D088ceFD1E95ba4c4a5F7EeA41a1Ec37e8b;
-    address constant UNISWAP_V3   = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+
 
     address constant CELO = 0x471EcE3750Da237f93B8E339c536989b8978a438;
     address constant CUSD = 0x765DE816845861e75A25fCA122bb6898B8B1282a;
@@ -72,7 +72,7 @@ contract CeloOracleSwapForkTest is Test {
     address constant REPUTATION_REGISTRY = 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63;
 
     bytes32 constant VERATO_ORDER_TYPEHASH =
-        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,bytes settlementData)");
+        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,uint256 minSolverReputation,bytes settlementData)");
 
     IVerato verato;
     AaveOracleAdapter oracleAdapter;
@@ -95,9 +95,9 @@ contract CeloOracleSwapForkTest is Test {
         for (uint256 i; i < proof.length; i++) r = abi.encodePacked(r, proof[i]);
         return r;
     }
-    function _signOrder(uint256 pk, bytes32 root, uint48 dl, uint256 maxFee, address solver, bytes memory sd) internal view returns (bytes memory) {
+    function _signOrder(uint256 pk, bytes32 root, uint48 dl, uint256 maxFee, address solver, uint256 minSolverRep, bytes memory sd) internal view returns (bytes memory) {
         bytes32 ds = verato.DOMAIN_SEPARATOR();
-        bytes32 sh = keccak256(abi.encode(VERATO_ORDER_TYPEHASH, root, dl, maxFee, solver, keccak256(sd)));
+        bytes32 sh = keccak256(abi.encode(VERATO_ORDER_TYPEHASH, root, dl, maxFee, solver, minSolverRep, keccak256(sd)));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, keccak256(abi.encodePacked("\x19\x01", ds, sh)));
         return abi.encodePacked(r, s, v);
     }
@@ -111,7 +111,7 @@ contract CeloOracleSwapForkTest is Test {
         (user, userPk) = makeAddrAndKey("swapUser");
 
         // Deploy Verato from pre-compiled artifact
-        bytes memory args = abi.encode(IDENTITY_REGISTRY, REPUTATION_REGISTRY, UNISWAP_V3, CELO);
+        bytes memory args = abi.encode(IDENTITY_REGISTRY, REPUTATION_REGISTRY);
         bytes memory bc = abi.encodePacked(vm.getCode("out/Verato.sol/Verato.json"), args);
         address d; assembly { d := create(0, add(bc, 0x20), mload(bc)) }
         require(d != address(0)); verato = IVerato(d);
@@ -216,12 +216,9 @@ contract CeloOracleSwapForkTest is Test {
         );
 
         uint48 deadline = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(userPk, root, deadline, 0, address(0), settlementPayload);
+        bytes memory sig = _signOrder(userPk, root, deadline, 0, address(0), 0, settlementPayload);
 
-        vm.prank(user);
-        verato.setUserSolverTrust(address(this), true);
-
-        verato.settle(0, address(0), deadline, sig, orderData, executionData, fillerCalldata);
+        verato.settle(0, address(0), 0, deadline, sig, orderData, executionData, fillerCalldata);
 
         uint256 aWethAfter = IERC20(aWETH).balanceOf(user);
         uint256 aCusdAfter = IERC20(aCUSD).balanceOf(user);
@@ -286,10 +283,9 @@ contract CeloOracleSwapForkTest is Test {
         );
 
         uint48 deadline = uint48(block.timestamp + 1 hours);
-        bytes memory sig = _signOrder(userPk, root, deadline, 0, address(0), settlementPayload);
-        vm.prank(user); verato.setUserSolverTrust(address(this), true);
+        bytes memory sig = _signOrder(userPk, root, deadline, 0, address(0), 0, settlementPayload);
 
-        verato.settle(0, address(0), deadline, sig, orderData, executionData, fillerCalldata);
+        verato.settle(0, address(0), 0, deadline, sig, orderData, executionData, fillerCalldata);
 
         uint256 aCusdAfter = IERC20(aCUSD).balanceOf(user);
         assertGt(aCusdAfter, 0, "user has cUSD from swap");
