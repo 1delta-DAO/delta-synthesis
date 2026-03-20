@@ -398,7 +398,7 @@ abstract contract SettlementExecutor is UniversalSettlementLending {
             uint256 amount;
             address receiver;
 
-            assembly {
+            assembly ("memory-safe") {
                 let ed := add(add(executionData, 0x20), newExecOffset)
 
                 asset := shr(96, mload(ed))

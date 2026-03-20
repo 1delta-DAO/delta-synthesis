@@ -5,6 +5,7 @@ dist/
 
 # Foundry
 packages/contracts/out/
+packages/contracts/out-fork/
 packages/contracts/cache/
 
 # IDE

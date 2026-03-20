@@ -33,14 +33,14 @@ abstract contract EIP712OrderVerifier {
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
-    bytes32 internal constant INFINITE_ORDER_TYPEHASH =
-        keccak256("InfiniteOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,bytes settlementData)");
+    bytes32 internal constant VERATO_ORDER_TYPEHASH =
+        keccak256("VeratoOrder(bytes32 merkleRoot,uint48 deadline,uint256 maxFeeBps,address solver,bytes settlementData)");
 
     constructor() {
         _DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH,
-                keccak256("InfiniteSettlement"),
+                keccak256("Verato"),
                 keccak256("1"),
                 block.chainid,
                 address(this)
@@ -69,8 +69,9 @@ abstract contract EIP712OrderVerifier {
         address solver,
         bytes calldata settlementData
     ) external {
+        bytes32 dataHash = keccak256(settlementData);
         bytes32 structHash = keccak256(
-            abi.encode(INFINITE_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, keccak256(settlementData))
+            abi.encode(VERATO_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, dataHash)
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _DOMAIN_SEPARATOR, structHash));
 
@@ -94,7 +95,7 @@ abstract contract EIP712OrderVerifier {
     // ── Signature Recovery ────────────────────────────────
 
     /**
-     * @notice Recovers the signer of a InfiniteOrder after checking the deadline
+     * @notice Recovers the signer of a VeratoOrder after checking the deadline
      *         and cancellation status.
      * @param merkleRoot       Merkle root of allowed actions
      * @param deadline         Order expiry timestamp
@@ -115,7 +116,7 @@ abstract contract EIP712OrderVerifier {
         if (solver != address(0) && msg.sender != solver) revert UnauthorizedSolver();
 
         bytes32 structHash = keccak256(
-            abi.encode(INFINITE_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, keccak256(settlementData))
+            abi.encode(VERATO_ORDER_TYPEHASH, merkleRoot, deadline, maxFeeBps, solver, keccak256(settlementData))
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _DOMAIN_SEPARATOR, structHash));
 
