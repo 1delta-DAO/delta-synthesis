@@ -11,5 +11,8 @@
   },
   "devDependencies": {
     "typescript": "~5.9.3"
+  },
+  "dependencies": {
+    "viem": "^2.47.5"
   }
 }
