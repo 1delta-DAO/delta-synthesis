@@ -5,7 +5,7 @@ pragma solidity ^0.8.13;
 ///         The on-chain registry is an ERC-721 – each agent mints an NFT
 ///         whose tokenId becomes its portable identity.
 interface IIdentityRegistry {
-    // --- ERC-721 subset used by DeltaGateway ---
+    // --- ERC-721 subset used by Verato ---
     function balanceOf(address owner) external view returns (uint256);
     function ownerOf(uint256 tokenId) external view returns (address);
 

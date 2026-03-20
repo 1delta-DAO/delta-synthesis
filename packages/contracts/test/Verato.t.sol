@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.13;
+pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
-import {DeltaGateway} from "../src/DeltaGateway.sol";
+import {Verato} from "../src/core/settlement/celo/Verato.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 import {MockReputationRegistry} from "./mocks/MockReputationRegistry.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 
-contract DeltaGatewayTest is Test {
-    DeltaGateway public gateway;
+contract VeratoTest is Test {
+    Verato public gateway;
     MockERC20 public usdc;
     MockERC20 public celo;
     MockIdentityRegistry public identityRegistry;
@@ -35,7 +35,7 @@ contract DeltaGatewayTest is Test {
         // So for 1 USDC (1e6) to get 5 CELO (5e18): rate = 5e18 * 1e18 / 1e6 = 5e30.
         swapRouter = new MockSwapRouter(5e30);
 
-        gateway = new DeltaGateway(
+        gateway = new Verato(
             address(identityRegistry),
             address(reputationRegistry),
             address(swapRouter),
@@ -103,13 +103,13 @@ contract DeltaGatewayTest is Test {
         gateway.revokeAgentId(AGENT_ID);
 
         vm.prank(agent);
-        vm.expectRevert(DeltaGateway.Unauthorised.selector);
+        vm.expectRevert(Verato.Unauthorised.selector);
         gateway.deposit(user, address(usdc), 500e6);
     }
 
     function test_linkAgentId_reverts_unregistered() public {
         vm.prank(agent);
-        vm.expectRevert(DeltaGateway.AgentNotRegistered.selector);
+        vm.expectRevert(Verato.AgentNotRegistered.selector);
         gateway.linkAgentId(AGENT_ID);
     }
 
@@ -139,7 +139,7 @@ contract DeltaGatewayTest is Test {
         gateway.setTrustPolicy(false, 90);
 
         vm.prank(agent);
-        vm.expectRevert(DeltaGateway.ReputationTooLow.selector);
+        vm.expectRevert(Verato.ReputationTooLow.selector);
         gateway.deposit(user, address(usdc), 100e6);
     }
 
@@ -199,7 +199,7 @@ contract DeltaGatewayTest is Test {
 
     function test_claimFees_reverts_noFees() public {
         vm.prank(agent);
-        vm.expectRevert(DeltaGateway.NoFeesToClaim.selector);
+        vm.expectRevert(Verato.NoFeesToClaim.selector);
         gateway.claimFees(address(usdc));
     }
 
@@ -309,13 +309,13 @@ contract DeltaGatewayTest is Test {
 
     function test_deposit_reverts_unauthorised() public {
         vm.prank(stranger);
-        vm.expectRevert(DeltaGateway.Unauthorised.selector);
+        vm.expectRevert(Verato.Unauthorised.selector);
         gateway.deposit(user, address(usdc), 100e6);
     }
 
     function test_deposit_reverts_zeroAmount() public {
         vm.prank(user);
-        vm.expectRevert(DeltaGateway.ZeroAmount.selector);
+        vm.expectRevert(Verato.ZeroAmount.selector);
         gateway.deposit(user, address(usdc), 0);
     }
 
@@ -333,7 +333,7 @@ contract DeltaGatewayTest is Test {
 
     function test_withdraw_reverts_insufficientBalance() public {
         vm.prank(user);
-        vm.expectRevert(DeltaGateway.InsufficientBalance.selector);
+        vm.expectRevert(Verato.InsufficientBalance.selector);
         gateway.withdraw(user, address(usdc), 1);
     }
 
@@ -371,7 +371,7 @@ contract DeltaGatewayTest is Test {
 
     function test_repay_reverts_overRepay() public {
         vm.prank(user);
-        vm.expectRevert(DeltaGateway.InsufficientBalance.selector);
+        vm.expectRevert(Verato.InsufficientBalance.selector);
         gateway.repay(user, address(usdc), 1);
     }
 }
