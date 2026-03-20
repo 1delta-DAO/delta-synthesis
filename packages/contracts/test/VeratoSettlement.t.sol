@@ -8,7 +8,7 @@ import {SettlementExecutor} from "../src/core/settlement/SettlementExecutor.sol"
  * @notice Harness whose lending ops return realistic (amountIn, amountOut) based
  *         on the operation type, exercising the zero-sum delta accounting path.
  */
-contract DeltaHarness is SettlementExecutor {
+contract VeratoHarness is SettlementExecutor {
     struct Conversion {
         address inputAsset;
         uint256 inputAmount;
@@ -42,7 +42,7 @@ contract DeltaHarness is SettlementExecutor {
     function _executeIntent(
         address, bytes memory, bytes memory,
         AssetDelta[] memory deltas, uint256 deltaCount
-    ) internal override returns (uint256 newDeltaCount) {
+    ) internal override view returns (uint256 newDeltaCount) {
         if (!hasConversion) return deltaCount;
         Conversion memory c = pendingConversion;
         newDeltaCount = _updateDelta(deltas, deltaCount, c.inputAsset, -int256(c.inputAmount), 0);
@@ -57,8 +57,8 @@ contract DeltaHarness is SettlementExecutor {
     }
 }
 
-contract SettlementDeltaTest is Test {
-    DeltaHarness harness;
+contract SettlementVeratoTest is Test {
+    VeratoHarness harness;
 
     address constant CALLER = address(0xCAFE);
     // Celo mainnet tokens
@@ -67,7 +67,7 @@ contract SettlementDeltaTest is Test {
     address constant RECEIVER = address(0xBEEF);
 
     function setUp() public {
-        harness = new DeltaHarness();
+        harness = new VeratoHarness();
     }
 
     function _leaf(uint8 op, uint16 lender, bytes memory data) internal pure returns (bytes32) {

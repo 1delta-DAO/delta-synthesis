@@ -149,7 +149,7 @@ contract CeloOracleSwapForkTest is Test {
     //  Test: oracle adapter sanity — WETH→cUSD conversion
     // ═══════════════════════════════════════════════════════════
 
-    function test_celoOracle_wethToCusd() public {
+    function test_celoOracle_wethToCusd() public view {
         uint256 wethPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(WETH);
         uint256 cusdPrice = IAaveOracle(AAVE_ORACLE).getAssetPrice(CUSD);
         console.log("WETH price (8 dec):", wethPrice);
@@ -255,12 +255,10 @@ contract CeloOracleSwapForkTest is Test {
 
         // Swap only 10% of WETH to cUSD (keep HF healthy)
         uint256 swapAmount = IERC20(aWETH).balanceOf(user) / 10;
-        uint256 expectedCusd = oracleAdapter.getExpectedOutput(WETH, CUSD, swapAmount);
 
         bytes memory withdrawData = abi.encodePacked(aWETH, AAVE_V3_POOL);
         bytes memory depositData = abi.encodePacked(AAVE_V3_POOL);
-        bytes memory repayData = abi.encodePacked(uint8(2), vDebtUSDC, AAVE_V3_POOL);
-        bytes memory borrowData = abi.encodePacked(uint8(2), AAVE_V3_POOL);
+
 
         bytes32 l0 = _leaf(3, 0, withdrawData);
         bytes32 l1 = _leaf(0, 0, depositData);
