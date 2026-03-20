@@ -3,6 +3,7 @@ import type { AaveTokensData, MorphoPoolsData, SelectionState, AaveSelection, To
 import { CHAIN_NAMES } from '../types'
 import aaveTokensRaw from '../data/aave-tokens.json'
 import morphoPoolsRaw from '../data/morpho-pools.json'
+import OrderBuilder from './OrderBuilder'
 
 const aaveTokens = aaveTokensRaw as AaveTokensData
 const morphoPools = morphoPoolsRaw as MorphoPoolsData
@@ -438,6 +439,14 @@ export default function Configurator() {
       <div className="border-t border-gray-800 pt-4">
         <SelectionSummary selection={selection} />
       </div>
+
+      {/* Order builder */}
+      {config.entries.length > 0 && (
+        <section className="border-t border-gray-800 pt-4">
+          <h2 className="text-lg font-semibold text-emerald-400 mb-3">Build Order</h2>
+          <OrderBuilder config={config} />
+        </section>
+      )}
 
       {/* Collected config output */}
       {config.entries.length > 0 && (

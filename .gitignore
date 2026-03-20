@@ -9,6 +9,9 @@ packages/contracts/out/
 packages/contracts/out-fork/
 packages/contracts/cache/
 
+# Cloudflare
+wrangler.toml
+
 # IDE
 .vscode/
 .idea/

@@ -1,10 +1,17 @@
 {
   "name": "delta-synthesis",
   "private": true,
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
-    "dev": "pnpm --filter frontend dev",
-    "build": "pnpm --filter frontend build",
+    "dev": "pnpm --filter @delta-synthesis/frontend dev",
+    "build": "pnpm --filter @delta-synthesis/frontend build",
+    "sdk:build": "pnpm --filter @delta-synthesis/sdk build",
+    "sdk:dev": "pnpm --filter @delta-synthesis/sdk dev",
     "contracts:build": "pnpm --filter contracts build",
-    "contracts:test": "pnpm --filter contracts test"
+    "contracts:test": "pnpm --filter contracts test",
+    "agent:dev": "pnpm --filter @delta-synthesis/backend-agent dev",
+    "agent:deploy": "pnpm --filter @delta-synthesis/backend-agent deploy",
+    "orders:dev": "pnpm --filter @delta-synthesis/backend-orders dev",
+    "orders:deploy": "pnpm --filter @delta-synthesis/backend-orders deploy"
   }
 }

@@ -18,6 +18,7 @@ contract VeratoScript is Script {
         );
 
         console.log("Verato deployed at:", address(verato));
+        console.log("Forwarder deployed at:", address(verato.forwarder()));
 
         vm.stopBroadcast();
     }
