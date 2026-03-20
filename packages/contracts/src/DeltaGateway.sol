@@ -4,11 +4,13 @@ pragma solidity ^0.8.13;
 import {IERC20} from "lib/forge-std/src/interfaces/IERC20.sol";
 import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {IReputationRegistry} from "./interfaces/IReputationRegistry.sol";
+import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 
 /// @title DeltaGateway
 /// @notice Gateway contract that AI agents use to manage user lending positions.
 ///         Users permission agents either by direct address trust or via
 ///         Celo ERC-8004 agent trust (identity + reputation gating).
+///         Agents earn fees on successful operations and can swap them to CELO.
 contract DeltaGateway {
     // --- Types ---
 
@@ -17,16 +19,30 @@ contract DeltaGateway {
         uint256 borrowed;
     }
 
-    /// @notice Per-user trust policy. Users choose how agents are vetted.
+    /// @notice Per-user trust policy.
     struct TrustPolicy {
-        bool requireRegistered; // agent must hold an ERC-8004 identity NFT
-        uint256 minReputation;  // minimum average reputation score (0-100, 0 = no check)
+        bool requireRegistered;
+        uint256 minReputation;
     }
+
+    /// @notice Tracks an agent's performance for a given user.
+    struct AgentScore {
+        uint256 opsSettled;    // total operations executed
+        uint256 opsReverted;   // operations that the user flagged / disputed
+        uint256 feesEarned;    // lifetime fees earned (denominated in fee token)
+    }
+
+    // --- Constants ---
+
+    uint256 public constant FEE_BPS = 10; // 0.10 % per operation
+    uint256 public constant BPS = 10_000;
 
     // --- Immutables ---
 
     IIdentityRegistry public immutable identityRegistry;
     IReputationRegistry public immutable reputationRegistry;
+    ISwapRouter public immutable swapRouter;
+    address public immutable nativeToken; // CELO ERC-20 address
 
     // --- State ---
 
@@ -39,14 +55,18 @@ contract DeltaGateway {
     /// @notice user → trust policy
     mapping(address => TrustPolicy) public trustPolicies;
 
-    /// @notice agent address → ERC-8004 token ID (set by agent calling linkAgentId)
+    /// @notice agent address → ERC-8004 token ID
     mapping(address => uint256) public agentIdOf;
-
-    /// @notice agent address → whether agentIdOf has been set
     mapping(address => bool) public hasLinkedId;
 
     /// @notice user → token → Position
     mapping(address => mapping(address => Position)) public positions;
+
+    /// @notice agent → token → claimable fee balance
+    mapping(address => mapping(address => uint256)) public agentFees;
+
+    /// @notice user → agent → AgentScore
+    mapping(address => mapping(address => AgentScore)) public agentScores;
 
     // --- Events ---
 
@@ -60,6 +80,10 @@ contract DeltaGateway {
     event Withdraw(address indexed user, address indexed token, uint256 amount);
     event Borrow(address indexed user, address indexed token, uint256 amount);
     event Repay(address indexed user, address indexed token, uint256 amount);
+    event FeeCollected(address indexed agent, address indexed token, uint256 fee);
+    event FeesClaimed(address indexed agent, address indexed token, uint256 amount);
+    event FeesSwappedToNative(address indexed agent, address indexed tokenIn, uint256 amountIn, uint256 amountOut);
+    event OpDisputed(address indexed user, address indexed agent);
 
     // --- Errors ---
 
@@ -68,17 +92,25 @@ contract DeltaGateway {
     error ZeroAmount();
     error AgentNotRegistered();
     error ReputationTooLow();
+    error NoFeesToClaim();
+    error SwapFailed();
 
     // --- Constructor ---
 
-    constructor(address _identityRegistry, address _reputationRegistry) {
+    constructor(
+        address _identityRegistry,
+        address _reputationRegistry,
+        address _swapRouter,
+        address _nativeToken
+    ) {
         identityRegistry = IIdentityRegistry(_identityRegistry);
         reputationRegistry = IReputationRegistry(_reputationRegistry);
+        swapRouter = ISwapRouter(_swapRouter);
+        nativeToken = _nativeToken;
     }
 
     // --- Modifiers ---
 
-    /// @dev Caller must be the user themselves or pass all trust checks.
     modifier onlyAuthorised(address user) {
         if (msg.sender != user) {
             _checkAuthorised(user, msg.sender);
@@ -86,19 +118,19 @@ contract DeltaGateway {
         _;
     }
 
-    // --- Trust policy management ---
+    // =====================================================================
+    // Trust policy management
+    // =====================================================================
 
-    /// @notice Set your trust requirements for agents.
-    /// @param requireRegistered If true, agents must hold an ERC-8004 identity NFT.
-    /// @param minReputation     Minimum average reputation score (0-100). 0 disables the check.
     function setTrustPolicy(bool requireRegistered, uint256 minReputation) external {
         trustPolicies[msg.sender] = TrustPolicy(requireRegistered, minReputation);
         emit TrustPolicyUpdated(msg.sender, requireRegistered, minReputation);
     }
 
-    // --- Agent management ---
+    // =====================================================================
+    // Agent management
+    // =====================================================================
 
-    /// @notice Directly authorise an agent by address (no trust checks applied).
     function authoriseAgent(address agent) external {
         authorisedAgents[msg.sender][agent] = true;
         emit AgentAuthorised(msg.sender, agent);
@@ -109,8 +141,6 @@ contract DeltaGateway {
         emit AgentRevoked(msg.sender, agent);
     }
 
-    /// @notice Authorise an agent by its ERC-8004 token ID.
-    ///         Any address that has linked itself to this ID can then act.
     function authoriseAgentId(uint256 agentId) external {
         authorisedAgentIds[msg.sender][agentId] = true;
         emit AgentIdAuthorised(msg.sender, agentId);
@@ -121,8 +151,6 @@ contract DeltaGateway {
         emit AgentIdRevoked(msg.sender, agentId);
     }
 
-    /// @notice Agent calls this to link its address to its ERC-8004 NFT token ID.
-    ///         The caller must own at least one identity NFT (checked via balanceOf).
     function linkAgentId(uint256 agentId) external {
         if (identityRegistry.balanceOf(msg.sender) == 0) revert AgentNotRegistered();
         agentIdOf[msg.sender] = agentId;
@@ -130,57 +158,148 @@ contract DeltaGateway {
         emit AgentLinked(msg.sender, agentId);
     }
 
-    // --- Core actions (mock implementations) ---
+    // =====================================================================
+    // Core actions — fee-bearing
+    // =====================================================================
 
-    /// @notice Deposit tokens on behalf of `user`.
     function deposit(address user, address token, uint256 amount) external onlyAuthorised(user) {
         if (amount == 0) revert ZeroAmount();
 
         IERC20(token).transferFrom(user, address(this), amount);
-        positions[user][token].deposited += amount;
 
-        emit Deposit(user, token, amount);
+        uint256 fee = _collectFee(user, token, amount);
+        uint256 net = amount - fee;
+
+        positions[user][token].deposited += net;
+        emit Deposit(user, token, net);
     }
 
-    /// @notice Withdraw tokens back to `user`.
     function withdraw(address user, address token, uint256 amount) external onlyAuthorised(user) {
         if (amount == 0) revert ZeroAmount();
         if (positions[user][token].deposited < amount) revert InsufficientBalance();
 
         positions[user][token].deposited -= amount;
-        IERC20(token).transfer(user, amount);
 
-        emit Withdraw(user, token, amount);
+        uint256 fee = _collectFee(user, token, amount);
+        uint256 net = amount - fee;
+
+        IERC20(token).transfer(user, net);
+        emit Withdraw(user, token, net);
     }
 
-    /// @notice Mock borrow – records debt, transfers tokens from gateway reserves.
     function borrow(address user, address token, uint256 amount) external onlyAuthorised(user) {
         if (amount == 0) revert ZeroAmount();
 
         positions[user][token].borrowed += amount;
-        IERC20(token).transfer(user, amount);
 
-        emit Borrow(user, token, amount);
+        uint256 fee = _collectFee(user, token, amount);
+        uint256 net = amount - fee;
+
+        IERC20(token).transfer(user, net);
+        emit Borrow(user, token, net);
     }
 
-    /// @notice Mock repay – reduces debt, pulls tokens from user.
     function repay(address user, address token, uint256 amount) external onlyAuthorised(user) {
         if (amount == 0) revert ZeroAmount();
         if (positions[user][token].borrowed < amount) revert InsufficientBalance();
 
         IERC20(token).transferFrom(user, address(this), amount);
-        positions[user][token].borrowed -= amount;
 
-        emit Repay(user, token, amount);
+        uint256 fee = _collectFee(user, token, amount);
+        uint256 net = amount - fee;
+
+        positions[user][token].borrowed -= net;
+        emit Repay(user, token, net);
     }
 
-    // --- Internal ---
+    // =====================================================================
+    // Success criteria — simple dispute mechanism
+    // =====================================================================
+
+    /// @notice User flags a bad operation. Increments the agent's opsReverted counter.
+    ///         A high revert ratio is a signal for other users to avoid this agent.
+    function disputeAgent(address agent) external {
+        agentScores[msg.sender][agent].opsReverted += 1;
+        emit OpDisputed(msg.sender, agent);
+    }
+
+    /// @notice View helper: success rate in bps (0-10000). Returns 10000 if no ops yet.
+    function agentSuccessRate(address user, address agent) external view returns (uint256) {
+        AgentScore memory s = agentScores[user][agent];
+        if (s.opsSettled == 0) return BPS;
+        return ((s.opsSettled - s.opsReverted) * BPS) / s.opsSettled;
+    }
+
+    // =====================================================================
+    // Fee claims & swap-to-native
+    // =====================================================================
+
+    /// @notice Agent claims accumulated fees in a specific token.
+    function claimFees(address token) external {
+        uint256 amount = agentFees[msg.sender][token];
+        if (amount == 0) revert NoFeesToClaim();
+
+        agentFees[msg.sender][token] = 0;
+        IERC20(token).transfer(msg.sender, amount);
+
+        emit FeesClaimed(msg.sender, token, amount);
+    }
+
+    /// @notice Agent swaps accumulated fees directly to CELO via Uniswap V3
+    ///         so it can pay for its own gas (self-funding loop).
+    /// @param token       The fee token to swap.
+    /// @param poolFee     Uniswap V3 pool fee tier (e.g. 3000 = 0.3%).
+    /// @param minAmountOut Minimum CELO to receive (slippage protection).
+    function claimFeesAsNative(
+        address token,
+        uint24 poolFee,
+        uint256 minAmountOut
+    ) external returns (uint256 amountOut) {
+        uint256 amount = agentFees[msg.sender][token];
+        if (amount == 0) revert NoFeesToClaim();
+
+        agentFees[msg.sender][token] = 0;
+
+        // Approve router to spend the fee tokens
+        IERC20(token).approve(address(swapRouter), amount);
+
+        amountOut = swapRouter.exactInputSingle(
+            ISwapRouter.ExactInputSingleParams({
+                tokenIn: token,
+                tokenOut: nativeToken,
+                fee: poolFee,
+                recipient: msg.sender,
+                deadline: block.timestamp,
+                amountIn: amount,
+                amountOutMinimum: minAmountOut,
+                sqrtPriceLimitX96: 0
+            })
+        );
+
+        emit FeesSwappedToNative(msg.sender, token, amount, amountOut);
+    }
+
+    // =====================================================================
+    // Internal
+    // =====================================================================
+
+    /// @dev Collects fee from the operation amount. Fee stays in the contract,
+    ///      credited to the calling agent. Returns the fee amount.
+    ///      When the user calls for themselves (no agent), no fee is charged.
+    function _collectFee(address user, address token, uint256 amount) internal returns (uint256 fee) {
+        if (msg.sender == user) return 0; // user acting for themselves — no fee
+
+        fee = (amount * FEE_BPS) / BPS;
+        agentFees[msg.sender][token] += fee;
+        agentScores[user][msg.sender].opsSettled += 1;
+        agentScores[user][msg.sender].feesEarned += fee;
+
+        emit FeeCollected(msg.sender, token, fee);
+    }
 
     function _checkAuthorised(address user, address caller) internal view {
-        // Path 1: direct address trust (bypasses all policy checks)
         if (authorisedAgents[user][caller]) return;
 
-        // Path 2: ERC-8004 identity-based trust
         if (hasLinkedId[caller]) {
             uint256 agentId = agentIdOf[caller];
             if (authorisedAgentIds[user][agentId]) {
