@@ -193,7 +193,7 @@ function derivePermissionRequests(
             seen.add(key)
             requests.push({
               kind: 'ERC2612_PERMIT',
-              label: `Permit ${token.symbol} aToken`,
+              label: `Permit ${token.symbol} aToken (${aave.fork.replace(/_/g, ' ')})`,
               targetAddress: token.collateralToken as Address,
               chainId,
             })
@@ -204,9 +204,12 @@ function derivePermissionRequests(
           const key = `delegation:${token.debtToken}`
           if (!seen.has(key)) {
             seen.add(key)
+            // Moola (Aave V2-based) vTokens don't support delegationWithSig,
+            // so use an on-chain approveDelegation tx instead
+            const usesTx = aave.fork === 'MOOLA'
             requests.push({
-              kind: 'AAVE_DELEGATION',
-              label: `Delegate ${token.symbol} vToken`,
+              kind: usesTx ? 'AAVE_DELEGATION_TX' : 'AAVE_DELEGATION',
+              label: `Delegate ${token.symbol} vToken (${aave.fork.replace(/_/g, ' ')})`,
               targetAddress: token.debtToken as Address,
               chainId,
             })
@@ -487,16 +490,18 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
                       <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${
                         req.kind === 'ERC2612_PERMIT' ? 'bg-indigo-600/20 text-indigo-400' :
                         req.kind === 'AAVE_DELEGATION' ? 'bg-red-600/20 text-red-400' :
+                        req.kind === 'AAVE_DELEGATION_TX' ? 'bg-orange-600/20 text-orange-400' :
                         'bg-violet-600/20 text-violet-400'
                       }`}>
                         {req.kind === 'ERC2612_PERMIT' ? 'Permit' :
                          req.kind === 'AAVE_DELEGATION' ? 'Delegation' :
+                         req.kind === 'AAVE_DELEGATION_TX' ? 'Approve (tx)' :
                          'Authorization'}
                       </span>
                     </div>
                   </div>
                   {signed ? (
-                    <span className="text-xs text-emerald-400">Signed</span>
+                    <span className="text-xs text-emerald-400">{req.kind === 'AAVE_DELEGATION_TX' ? 'Approved' : 'Signed'}</span>
                   ) : (
                     <button
                       onClick={() => signPermission(req)}
@@ -507,7 +512,9 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
                           : 'bg-amber-600 hover:bg-amber-500 text-white'
                       }`}
                     >
-                      {isCurrentlySigning ? 'Signing...' : 'Sign'}
+                      {isCurrentlySigning
+                        ? (req.kind === 'AAVE_DELEGATION_TX' ? 'Approving...' : 'Signing...')
+                        : (req.kind === 'AAVE_DELEGATION_TX' ? 'Approve' : 'Sign')}
                     </button>
                   )}
                 </div>

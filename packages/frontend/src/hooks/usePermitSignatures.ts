@@ -9,7 +9,8 @@ import {
 
 export type PermissionKind =
   | 'ERC2612_PERMIT'         // aToken approve
-  | 'AAVE_DELEGATION'        // vToken credit delegation
+  | 'AAVE_DELEGATION'        // vToken credit delegation (by signature)
+  | 'AAVE_DELEGATION_TX'     // vToken credit delegation (on-chain approveDelegation call)
   | 'MORPHO_AUTHORIZATION'   // Morpho Blue setAuthorization
 
 
@@ -43,6 +44,7 @@ const noncesAbi = [{ name: 'nonces', type: 'function', inputs: [{ type: 'address
 const nonceAbi = [{ name: 'nonce', type: 'function', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' }] as const
 const _noncesAbi = [{ name: '_nonces', type: 'function', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }], stateMutability: 'view' }] as const
 const nameAbi = [{ name: 'name', type: 'function', inputs: [], outputs: [{ type: 'string' }], stateMutability: 'view' }] as const
+const approveDelegationAbi = [{ name: 'approveDelegation', type: 'function', inputs: [{ name: 'delegatee', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [], stateMutability: 'nonpayable' }] as const
 
 // Default deadline: 1 hour from now
 function getDeadline(): bigint {
@@ -202,6 +204,29 @@ export function usePermitSignatures(settlementAddress: Address) {
             },
           })
           break
+        }
+
+        case 'AAVE_DELEGATION_TX': {
+          // On-chain approveDelegation call (for vTokens without delegationWithSig)
+          const { request: txRequest } = await publicClient.simulateContract({
+            account: address,
+            address: request.targetAddress,
+            abi: approveDelegationAbi,
+            functionName: 'approveDelegation',
+            args: [settlementAddress, maxUint256],
+          })
+          const txHash = await walletClient.writeContract(txRequest)
+          await publicClient.waitForTransactionReceipt({ hash: txHash })
+
+          // Store as a signed permission with a sentinel signature (no actual sig needed)
+          const txResult: SignedPermission = {
+            request,
+            signature: { v: 0, r: '0x0' as Hex, s: '0x0' as Hex },
+            deadline: 0n,
+            nonce: 0n,
+          }
+          setSignedPermissions((prev) => [...prev.filter(p => p.request.label !== request.label), txResult])
+          return
         }
       }
 
