@@ -1,0 +1,9 @@
+# Copy this to .dev.vars and fill in your secrets
+# wrangler dev reads these automatically
+
+# LLM provider (set one or both — Anthropic is preferred if both are set)
+ANTHROPIC_API_KEY=sk-ant-...
+# OPENAI_API_KEY=sk-...
+
+# Wallet private key for signing/submitting settlement txs
+PRIVATE_KEY=0x...

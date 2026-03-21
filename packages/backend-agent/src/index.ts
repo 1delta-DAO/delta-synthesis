@@ -24,6 +24,8 @@ import {
   LenderRange,
 } from '@delta-synthesis/settlement-sdk'
 import type { StoredPermit } from './order.js'
+import { initWallet, runAllSettlements } from './direct/index.js'
+import { setProviderKeys } from './providers/index.js'
 
 // Multicall ABI fragment (mutable copy to avoid const narrowing issues with writeContract)
 const multicallAbi = [
@@ -408,6 +410,20 @@ export default {
           }
         }
 
+        return Response.json({ processed: results.length, results })
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return Response.json({ error: msg }, { status: 500 })
+      }
+    }
+
+    // POST /run-direct — run the full direct settlement flow (positions + LLM + execute)
+    if (url.pathname === '/run-direct' && request.method === 'POST') {
+      try {
+        const chainId = parseInt(env.CHAIN_ID)
+        initWallet(env.PRIVATE_KEY, chainId)
+        setProviderKeys(env.ANTHROPIC_API_KEY, env.OPENAI_API_KEY)
+        const results = await runAllSettlements(chainId, env.ORDERS_API_URL)
         return Response.json({ processed: results.length, results })
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)

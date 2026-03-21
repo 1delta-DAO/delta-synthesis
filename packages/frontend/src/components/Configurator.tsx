@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react'
+import { useAccount } from 'wagmi'
 import type {
   SelectionState, AaveSelection,
   TokenSelection, MorphoMarketSelection, CollectedConfig, CollectedEntry,
@@ -11,6 +12,7 @@ import {
   isAaveLender,
   type LenderItem, type AaveMarket, type EnrichedMorphoMarket,
 } from '../hooks/useLendingData'
+import { useUserPositions } from '../hooks/useUserPositions'
 
 const morphoPools = morphoPoolsRaw as Record<string, Record<string, string>>
 
@@ -37,6 +39,97 @@ function formatRate(v: number): string {
 
 function formatPct(v: number): string {
   return `${(v * 100).toFixed(0)}%`
+}
+
+// ── User Positions Panel ─────────────────────────────────────────────────────
+
+function UserPositionsPanel({
+  chainId,
+}: {
+  chainId: string
+}) {
+  const { address } = useAccount()
+  const { positions, loading, error } = useUserPositions(address, address ? parseInt(chainId) : null)
+
+  if (!address) return null
+
+  const hasPositions = positions.length > 0 && positions.some(lp => lp.data.some(d => d.positions.length > 0))
+
+  return (
+    <section className="mb-4">
+      <h2 className="text-sm font-semibold text-amber-400 mb-2">Your Positions</h2>
+      {loading && (
+        <div className="flex items-center gap-2 py-3 px-3 rounded-xl bg-gray-900/40 border border-gray-800/80">
+          <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+          <span className="text-xs text-gray-400">Loading positions...</span>
+        </div>
+      )}
+      {error && (
+        <div className="text-xs text-red-400 px-3 py-2 rounded-xl bg-red-900/10 border border-red-900/30">
+          {error}
+        </div>
+      )}
+      {!loading && !error && !hasPositions && (
+        <div className="text-xs text-gray-600 px-3 py-3 rounded-xl bg-gray-900/40 border border-dashed border-gray-800/60 text-center">
+          No lending positions found on {chainName(chainId)}
+        </div>
+      )}
+      {!loading && hasPositions && (
+        <div className="space-y-2">
+          {positions.map((lp) =>
+            lp.data.map((acct, ai) => {
+              const activePositions = acct.positions.filter(p => parseFloat(p.deposits) > 0 || parseFloat(p.debt) > 0)
+              if (activePositions.length === 0) return null
+              const lenderName = lp.lender.replace(/_/g, ' ')
+              return (
+                <div key={`${lp.lender}-${ai}`} className="rounded-xl border border-gray-800/80 overflow-hidden bg-gray-900/40">
+                  <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-800/50 bg-amber-500/5">
+                    <span className="text-xs font-semibold text-white">{lenderName}</span>
+                    <div className="flex gap-3 text-[10px] text-gray-500">
+                      <span>Health: <span className={acct.health > 1.5 ? 'text-emerald-400' : acct.health > 1.1 ? 'text-amber-400' : 'text-red-400'}>{acct.health > 100 ? '∞' : acct.health.toFixed(2)}</span></span>
+                      <span>NAV: {formatUsd(acct.balanceData.nav)}</span>
+                    </div>
+                  </div>
+                  <div className="divide-y divide-gray-800/30">
+                    {activePositions.map((pos) => {
+                      const asset = pos.underlyingInfo?.asset
+                      const hasDeposit = parseFloat(pos.deposits) > 0
+                      const hasDebt = parseFloat(pos.debt) > 0
+                      return (
+                        <div key={pos.marketUid} className="flex items-center gap-2 px-3 py-1.5">
+                          {asset?.logoURI ? (
+                            <img src={asset.logoURI} alt="" className="w-5 h-5 rounded-full bg-white shrink-0" />
+                          ) : (
+                            <div className="w-5 h-5 rounded-full bg-gray-700 shrink-0" />
+                          )}
+                          <span className="text-xs font-medium text-white w-14 truncate">{asset?.symbol ?? '?'}</span>
+                          <div className="flex gap-3 text-[11px] ml-auto">
+                            {hasDeposit && (
+                              <span className="text-emerald-400" title="Deposited">
+                                +{formatUsd(pos.depositsUSD)}
+                              </span>
+                            )}
+                            {hasDebt && (
+                              <span className="text-red-400" title="Borrowed">
+                                -{formatUsd(pos.debtUSD)}
+                              </span>
+                            )}
+                            {pos.collateralEnabled && (
+                              <span className="text-[10px] text-gray-600" title="Collateral enabled">C</span>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            }),
+          )}
+        </div>
+      )}
+    </section>
+  )
 }
 
 // ── Helpers to extract data from API market objects ──────────────────────────
@@ -515,6 +608,8 @@ export default function Configurator() {
         <div className="grid gap-6 grid-cols-1 lg:grid-cols-[minmax(0,480px)_1fr]">
           {/* Left column: Market selection */}
           <div className="space-y-4 min-w-0">
+            <UserPositionsPanel chainId={selection.chainId} />
+
             <section>
               <h2 className="text-sm font-semibold text-indigo-400 mb-2">Lending Protocols</h2>
               <AavePanel
