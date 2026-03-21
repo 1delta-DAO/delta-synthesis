@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "pnpm --filter @delta-synthesis/frontend dev",
     "build": "pnpm --filter @delta-synthesis/frontend build",
-    "sdk:build": "pnpm --filter @delta-synthesis/sdk build",
-    "sdk:dev": "pnpm --filter @delta-synthesis/sdk dev",
+    "sdk:build": "pnpm --filter @delta-synthesis/settlement-sdk build",
+    "sdk:dev": "pnpm --filter @delta-synthesis/settlement-sdk dev",
     "contracts:build": "pnpm --filter contracts build",
     "contracts:test": "pnpm --filter contracts test",
     "agent:dev": "pnpm --filter @delta-synthesis/backend-agent dev",

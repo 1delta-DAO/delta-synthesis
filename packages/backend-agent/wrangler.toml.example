@@ -1,0 +1,16 @@
+name = "verato-agent"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+VERATO_ADDRESS = "0x9C2295A43C5b938b079f9057b82E4da7C832753A"
+FORWARDER_ADDRESS = "0x90d137E4845Ea9C5e4c9Bd8ABf8A1f9f04d0DE65"
+CHAIN_ID = "42220"
+RPC_URL = "https://forno.celo.org"
+ORDERS_API_URL = "https://verato-orders.<YOUR_SUBDOMAIN>.workers.dev"
+
+# Secrets (set via `wrangler secret put`):
+#   ANTHROPIC_API_KEY  — Claude API key for agent reasoning
+#   OPENAI_API_KEY=
+#   PRIVATE_KEY        — wallet private key for signing/submitting txs

@@ -90,7 +90,7 @@ packages/
       IIdentityRegistry.sol          ERC-8004 agent identity (NFT-based)
       IReputationRegistry.sol        On-chain reputation scoring
 
-  sdk/             TypeScript SDK (@delta-synthesis/sdk)
+  settlement-sdk/  TypeScript SDK (@delta-synthesis/settlement-sdk)
     settlement/
       builder.ts                     Fluent API for constructing orders
       merkle.ts                      Merkle tree construction & proof generation

@@ -5,6 +5,10 @@
  * 1. Polls the orders API for open signed orders
  * 2. Uses an LLM to evaluate whether to fill them
  * 3. Submits settlement transactions to Verato on Celo
+ *
+ * Supports both Anthropic (Claude) and OpenAI (GPT) as LLM backends.
+ * Set ANTHROPIC_API_KEY or OPENAI_API_KEY as a secret — if both are set,
+ * Anthropic is preferred.
  */
 
 import { createWalletClient, createPublicClient, http, type Hex, type Address } from 'viem'
@@ -12,7 +16,8 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { celo } from 'viem/chains'
 
 export interface Env {
-  ANTHROPIC_API_KEY: string
+  ANTHROPIC_API_KEY?: string
+  OPENAI_API_KEY?: string
   PRIVATE_KEY: string
   VERATO_ADDRESS: string
   FORWARDER_ADDRESS: string
@@ -71,11 +76,8 @@ interface OpenOrder {
 
 // ── LLM reasoning ──────────────────────────────────────────────────────
 
-async function evaluateOrder(
-  env: Env,
-  order: OpenOrder
-): Promise<{ shouldFill: boolean; reason: string; fillerCalldata: Hex }> {
-  const prompt = `You are an autonomous DeFi settlement agent operating on the Verato protocol on Celo.
+function buildPrompt(order: OpenOrder): string {
+  return `You are an autonomous DeFi settlement agent operating on the Verato protocol on Celo.
 
 You are evaluating whether to fill the following signed order:
 
@@ -97,12 +99,14 @@ Respond with a JSON object:
 }
 
 Consider: Is the deadline still valid? Is the fee attractive? Are the operations safe to execute?`
+}
 
+async function callAnthropic(apiKey: string, prompt: string): Promise<string> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': env.ANTHROPIC_API_KEY,
+      'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
@@ -113,13 +117,62 @@ Consider: Is the deadline still valid? Is the fee attractive? Are the operations
   })
 
   if (!response.ok) {
-    return { shouldFill: false, reason: `LLM error: ${response.status}`, fillerCalldata: '0x' }
+    throw new Error(`Anthropic API error: ${response.status}`)
   }
 
   const result = (await response.json()) as {
     content: Array<{ type: string; text: string }>
   }
-  const text = result.content[0]?.text ?? ''
+  return result.content[0]?.text ?? ''
+}
+
+async function callOpenAI(apiKey: string, prompt: string): Promise<string> {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      max_tokens: 512,
+      messages: [{ role: 'user', content: prompt }],
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`OpenAI API error: ${response.status}`)
+  }
+
+  const result = (await response.json()) as {
+    choices: Array<{ message: { content: string } }>
+  }
+  return result.choices[0]?.message?.content ?? ''
+}
+
+async function evaluateOrder(
+  env: Env,
+  order: OpenOrder
+): Promise<{ shouldFill: boolean; reason: string; fillerCalldata: Hex }> {
+  const prompt = buildPrompt(order)
+
+  let text: string
+  try {
+    if (env.ANTHROPIC_API_KEY) {
+      text = await callAnthropic(env.ANTHROPIC_API_KEY, prompt)
+    } else if (env.OPENAI_API_KEY) {
+      text = await callOpenAI(env.OPENAI_API_KEY, prompt)
+    } else {
+      return {
+        shouldFill: false,
+        reason: 'No LLM API key configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)',
+        fillerCalldata: '0x',
+      }
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { shouldFill: false, reason: `LLM error: ${msg}`, fillerCalldata: '0x' }
+  }
 
   try {
     const jsonMatch = text.match(/\{[\s\S]*\}/)
@@ -172,7 +225,8 @@ export default {
     const url = new URL(request.url)
 
     if (url.pathname === '/health') {
-      return Response.json({ status: 'ok', agent: 'verato-agent' })
+      const llmProvider = env.ANTHROPIC_API_KEY ? 'anthropic' : env.OPENAI_API_KEY ? 'openai' : 'none'
+      return Response.json({ status: 'ok', agent: 'verato-agent', llmProvider })
     }
 
     // POST /run — trigger the agent to scan and fill orders

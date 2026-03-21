@@ -1,5 +1,5 @@
 {
-  "name": "@delta-synthesis/sdk",
+  "name": "@delta-synthesis/settlement-sdk",
   "version": "0.0.1",
   "private": true,
   "type": "module",
