@@ -19,12 +19,19 @@ export interface TokenSelection {
 /** fork → underlying → TokenSelection */
 export type AaveSelection = Record<string, Record<string, TokenSelection>>
 
+/** Morpho market selection — keyed by market UID */
+export interface MorphoMarketSelection {
+  collateral: boolean
+  debt: boolean
+}
+
 export interface SelectionState {
   chainId: string
   aave: AaveSelection
   morpho: {
-    pools: string[] // "POOL_TYPE:CHAIN_ID" keys
+    pools: string[] // legacy "POOL_TYPE:CHAIN_ID" keys
   }
+  morphoMarkets: Record<string, MorphoMarketSelection> // marketUid → selection
 }
 
 // ── Collected config (derived from selections) ──────────────────────────────
@@ -50,7 +57,24 @@ export interface CollectedMorphoPool {
   address: string
 }
 
-export type CollectedEntry = CollectedAaveConfig | CollectedMorphoPool
+export interface CollectedMorphoMarket {
+  protocol: 'morpho-market'
+  lenderKey: string
+  chainId: string
+  morphoAddress: string  // the Morpho Blue singleton
+  marketId: string       // the market UID
+  loanToken: string
+  collateralToken: string
+  oracle: string
+  irm: string
+  lltv: string
+  loanSymbol: string
+  collateralSymbol: string
+  selectedCollateral: boolean
+  selectedDebt: boolean
+}
+
+export type CollectedEntry = CollectedAaveConfig | CollectedMorphoPool | CollectedMorphoMarket
 
 export interface CollectedConfig {
   chainId: string

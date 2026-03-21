@@ -1,18 +1,24 @@
 import { useState, useMemo, useCallback } from 'react'
-import { encodePacked, createWalletClient, custom, zeroAddress, type Address, type Hex } from 'viem'
-import { celo } from 'viem/chains'
-import type { CollectedConfig, CollectedAaveConfig } from '../types'
+import { useAccount, useConnect, useDisconnect } from 'wagmi'
+import { encodePacked, numberToHex, concatHex, zeroAddress, type Address, type Hex } from 'viem'
+import type { CollectedConfig, CollectedAaveConfig, CollectedMorphoMarket, AaveTokenEntry } from '../types'
+import { getVeratoAddress, getPoolAddress } from '../config/constants'
+import { usePermitSignatures, type PermissionSignatureRequest } from '../hooks/usePermitSignatures'
+import { useOrderSubmission } from '../hooks/useOrderSubmission'
+import aaveTokensRaw from '../data/aave-tokens.json'
+
 import {
   LendingOp,
   buildUnsignedOrder,
-  buildAndSignOrder,
-  type MerkleLeaf,
   type Condition,
-  type SignedOrder,
   type BuildOrderInput,
 } from '../settlement'
 
+type AaveTokensData = Record<string, Record<string, Record<string, AaveTokenEntry>>>
+const aaveTokens = aaveTokensRaw as AaveTokensData
+
 // ── Lender IDs for known forks ──────────────────────────────────────────
+// Matches DeltaEnums.sol: UP_TO_AAVE_V3=1000, UP_TO_AAVE_V2=2000, ..., UP_TO_MORPHO=5000
 
 const FORK_LENDER_ID: Record<string, number> = {
   AAVE_V3: 0,
@@ -20,6 +26,9 @@ const FORK_LENDER_ID: Record<string, number> = {
   AAVE_V3_ETHERFI: 0,
   MOOLA: 1000,
 }
+
+// Morpho lender IDs fall in the 4000-4999 range (UP_TO_COMPOUND_V2 < id < UP_TO_MORPHO)
+const MORPHO_LENDER_ID = 4000
 
 function lenderIdForFork(fork: string): number {
   return FORK_LENDER_ID[fork] ?? 0
@@ -34,78 +43,133 @@ interface LeafInput {
   label: string
 }
 
+/**
+ * Encode Morpho market data for Merkle leaf.
+ * Layout: [20: loanToken][20: collateralToken][20: oracle][20: irm][16: lltv][1: flags][20: morpho]
+ */
+function encodeMorphoData(
+  loanToken: Address,
+  collateralToken: Address,
+  oracle: Address,
+  irm: Address,
+  lltv: string,
+  morpho: Address,
+  flags: number = 0,
+): Hex {
+  return concatHex([
+    loanToken,                        // 20 bytes
+    collateralToken,                  // 20 bytes
+    oracle,                           // 20 bytes
+    irm,                              // 20 bytes
+    numberToHex(BigInt(lltv), { size: 16 }),  // 16 bytes (uint128)
+    numberToHex(flags, { size: 1 }),  // 1 byte
+    morpho,                           // 20 bytes
+  ])
+}
+
 function selectionToLeaves(config: CollectedConfig, poolAddress: Address): LeafInput[] {
   const leaves: LeafInput[] = []
   const seen = new Set<string>()
 
   for (const entry of config.entries) {
-    if (entry.protocol !== 'aave') continue
-    const aave = entry as CollectedAaveConfig
-    const lenderId = lenderIdForFork(aave.fork)
+    // ── Aave leaves ─────────────────────────────────────────────────
+    if (entry.protocol === 'aave') {
+      const aave = entry as CollectedAaveConfig
+      const lenderId = lenderIdForFork(aave.fork)
 
-    for (const token of aave.tokens) {
-      if (token.collateralToken) {
-        // DEPOSIT: user deposits collateral → data = abi.encodePacked(pool)
-        const data = encodePacked(['address'], [poolAddress])
-        const key = `${LendingOp.DEPOSIT}:${lenderId}:${data}`
-        if (!seen.has(key)) {
-          seen.add(key)
-          leaves.push({
-            op: LendingOp.DEPOSIT,
-            lenderId,
-            data,
-            label: `Deposit ${token.symbol} (${aave.fork})`,
-          })
+      for (const token of aave.tokens) {
+        if (token.collateralToken) {
+          const data = encodePacked(['address'], [poolAddress])
+          const key = `${LendingOp.DEPOSIT}:${lenderId}:${data}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            leaves.push({ op: LendingOp.DEPOSIT, lenderId, data, label: `Deposit ${token.symbol} (${aave.fork})` })
+          }
+
+          const wdData = encodePacked(['address', 'address'], [token.collateralToken as Address, poolAddress])
+          const wdKey = `${LendingOp.WITHDRAW}:${lenderId}:${wdData}`
+          if (!seen.has(wdKey)) {
+            seen.add(wdKey)
+            leaves.push({ op: LendingOp.WITHDRAW, lenderId, data: wdData, label: `Withdraw ${token.symbol} (${aave.fork})` })
+          }
         }
 
-        // WITHDRAW: data = abi.encodePacked(aToken, pool)
-        const wdData = encodePacked(
-          ['address', 'address'],
-          [token.collateralToken as Address, poolAddress]
-        )
-        const wdKey = `${LendingOp.WITHDRAW}:${lenderId}:${wdData}`
+        if (token.debtToken) {
+          const brData = encodePacked(['uint8', 'address', 'address'], [2, poolAddress, token.debtToken as Address])
+          const brKey = `${LendingOp.BORROW}:${lenderId}:${brData}`
+          if (!seen.has(brKey)) {
+            seen.add(brKey)
+            leaves.push({ op: LendingOp.BORROW, lenderId, data: brData, label: `Borrow ${token.symbol} (${aave.fork})` })
+          }
+
+          const rpData = encodePacked(['uint8', 'address', 'address'], [2, poolAddress, token.debtToken as Address])
+          const rpKey = `${LendingOp.REPAY}:${lenderId}:${rpData}`
+          if (!seen.has(rpKey)) {
+            seen.add(rpKey)
+            leaves.push({ op: LendingOp.REPAY, lenderId, data: rpData, label: `Repay ${token.symbol} (${aave.fork})` })
+          }
+        }
+      }
+    }
+
+    // ── Morpho market leaves ────────────────────────────────────────
+    if (entry.protocol === 'morpho-market') {
+      const m = entry as CollectedMorphoMarket
+      const lenderId = MORPHO_LENDER_ID
+
+      const morphoData = encodeMorphoData(
+        m.loanToken as Address,
+        m.collateralToken as Address,
+        m.oracle as Address,
+        m.irm as Address,
+        m.lltv,
+        m.morphoAddress as Address,
+      )
+
+      if (m.selectedCollateral) {
+        // DEPOSIT (supply collateral)
+        const depKey = `${LendingOp.DEPOSIT}:${lenderId}:${morphoData}`
+        if (!seen.has(depKey)) {
+          seen.add(depKey)
+          leaves.push({ op: LendingOp.DEPOSIT, lenderId, data: morphoData, label: `Deposit collateral (Morpho ${m.loanSymbol})` })
+        }
+
+        // WITHDRAW (withdraw collateral)
+        const wdKey = `${LendingOp.WITHDRAW}:${lenderId}:${morphoData}`
         if (!seen.has(wdKey)) {
           seen.add(wdKey)
-          leaves.push({
-            op: LendingOp.WITHDRAW,
-            lenderId,
-            data: wdData,
-            label: `Withdraw ${token.symbol} (${aave.fork})`,
-          })
+          leaves.push({ op: LendingOp.WITHDRAW, lenderId, data: morphoData, label: `Withdraw collateral (Morpho ${m.loanSymbol})` })
         }
       }
 
-      if (token.debtToken) {
-        // BORROW: data = abi.encodePacked(uint8(2), pool, debtToken) — rateMode=2 (variable)
-        const brData = encodePacked(
-          ['uint8', 'address', 'address'],
-          [2, poolAddress, token.debtToken as Address]
-        )
-        const brKey = `${LendingOp.BORROW}:${lenderId}:${brData}`
+      if (m.selectedDebt) {
+        // BORROW
+        const brKey = `${LendingOp.BORROW}:${lenderId}:${morphoData}`
         if (!seen.has(brKey)) {
           seen.add(brKey)
-          leaves.push({
-            op: LendingOp.BORROW,
-            lenderId,
-            data: brData,
-            label: `Borrow ${token.symbol} (${aave.fork})`,
-          })
+          leaves.push({ op: LendingOp.BORROW, lenderId, data: morphoData, label: `Borrow ${m.loanSymbol} (Morpho)` })
         }
 
-        // REPAY: data = abi.encodePacked(uint8(2), pool, debtToken) — rateMode=2
-        const rpData = encodePacked(
-          ['uint8', 'address', 'address'],
-          [2, poolAddress, token.debtToken as Address]
-        )
-        const rpKey = `${LendingOp.REPAY}:${lenderId}:${rpData}`
+        // REPAY
+        const rpKey = `${LendingOp.REPAY}:${lenderId}:${morphoData}`
         if (!seen.has(rpKey)) {
           seen.add(rpKey)
-          leaves.push({
-            op: LendingOp.REPAY,
-            lenderId,
-            data: rpData,
-            label: `Repay ${token.symbol} (${aave.fork})`,
-          })
+          leaves.push({ op: LendingOp.REPAY, lenderId, data: morphoData, label: `Repay ${m.loanSymbol} (Morpho)` })
+        }
+      }
+
+      // DEPOSIT_LENDING_TOKEN (supply loan token to earn yield)
+      if (m.selectedDebt) {
+        const dlKey = `${LendingOp.DEPOSIT_LENDING}:${lenderId}:${morphoData}`
+        if (!seen.has(dlKey)) {
+          seen.add(dlKey)
+          leaves.push({ op: LendingOp.DEPOSIT_LENDING, lenderId, data: morphoData, label: `Supply ${m.loanSymbol} (Morpho lending)` })
+        }
+
+        const wlKey = `${LendingOp.WITHDRAW_LENDING}:${lenderId}:${morphoData}`
+        if (!seen.has(wlKey)) {
+          seen.add(wlKey)
+          leaves.push({ op: LendingOp.WITHDRAW_LENDING, lenderId, data: morphoData, label: `Withdraw ${m.loanSymbol} (Morpho lending)` })
         }
       }
     }
@@ -114,45 +178,117 @@ function selectionToLeaves(config: CollectedConfig, poolAddress: Address): LeafI
   return leaves
 }
 
-// ── Pool addresses per chain ────────────────────────────────────────────
+// ── Derive required permission signatures from config ───────────────────
 
-const POOL_ADDRESSES: Record<string, Address> = {
-  '42220': '0x3E59A31363E2ad014dcbc521c4a0d5757d9f3402', // Celo Aave V3
-  '1':     '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',  // Ethereum
-  '10':    '0x794a61358D6845594F94dc1DB02A252b5b4814aD',   // Optimism
-  '137':   '0x794a61358D6845594F94dc1DB02A252b5b4814aD',   // Polygon
-  '42161': '0x794a61358D6845594F94dc1DB02A252b5b4814aD',   // Arbitrum
-  '8453':  '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',   // Base
-  '43114': '0x794a61358D6845594F94dc1DB02A252b5b4814aD',   // Avalanche
-  '56':    '0x6807dc923806fE8Fd134338EABCA509979a7e0cB',    // BNB
-}
+function derivePermissionRequests(
+  config: CollectedConfig,
+): PermissionSignatureRequest[] {
+  const requests: PermissionSignatureRequest[] = []
+  const seen = new Set<string>()
+  const chainId = Number(config.chainId)
 
-// ── Verato addresses (deployed) ─────────────────────────────────────────
+  for (const entry of config.entries) {
+    if (entry.protocol === 'aave') {
+      const aave = entry as CollectedAaveConfig
+      const forkData = aaveTokens[aave.fork]?.[config.chainId] ?? {}
 
-const VERATO_ADDRESSES: Record<string, Address> = {
-  '42220': zeroAddress, // Placeholder — replace with actual deployment
+      for (const token of aave.tokens) {
+        const tokenData = forkData[token.underlying]
+        if (!tokenData) continue
+
+        if (token.collateralToken) {
+          const key = `permit:${token.collateralToken}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            requests.push({
+              kind: 'ERC2612_PERMIT',
+              label: `Permit ${tokenData.symbol} aToken`,
+              targetAddress: token.collateralToken as Address,
+              chainId,
+            })
+          }
+        }
+
+        if (token.debtToken) {
+          const key = `delegation:${token.debtToken}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            requests.push({
+              kind: 'AAVE_DELEGATION',
+              label: `Delegate ${tokenData.symbol} vToken`,
+              targetAddress: token.debtToken as Address,
+              chainId,
+            })
+          }
+        }
+      }
+    }
+
+    if (entry.protocol === 'morpho-market') {
+      const m = entry as CollectedMorphoMarket
+      const key = `morpho:${m.morphoAddress}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        requests.push({
+          kind: 'MORPHO_AUTHORIZATION',
+          label: `Authorize Morpho Blue`,
+          targetAddress: m.morphoAddress as Address,
+          chainId,
+        })
+      }
+    }
+  }
+
+  return requests
 }
 
 // ── Component ───────────────────────────────────────────────────────────
 
 const OP_NAMES = ['Deposit', 'Borrow', 'Repay', 'Withdraw', 'Deposit (lending)', 'Withdraw (lending)']
+const OP_COLORS: Record<number, string> = {
+  0: 'bg-green-600/20 text-green-400',
+  1: 'bg-red-600/20 text-red-400',
+  2: 'bg-blue-600/20 text-blue-400',
+  3: 'bg-yellow-600/20 text-yellow-400',
+}
 
 export default function OrderBuilder({ config }: { config: CollectedConfig }) {
+  const { address, isConnected } = useAccount()
+  const { connect, connectors } = useConnect()
+  const { disconnect } = useDisconnect()
+
   const [minReputation, setMinReputation] = useState(0)
   const [minHealthFactor, setMinHealthFactor] = useState(1.1)
-  const [maxFeeBps, setMaxFeeBps] = useState(50000) // 0.5% in 1e7 units
+  const [maxFeeBps, setMaxFeeBps] = useState(50000)
   const [deadlineMinutes, setDeadlineMinutes] = useState(60)
-  const [signedOrder, setSignedOrder] = useState<SignedOrder | null>(null)
-  const [signing, setSigning] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
-  const poolAddress = POOL_ADDRESSES[config.chainId] ?? zeroAddress
-  const veratoAddress = VERATO_ADDRESSES[config.chainId] ?? zeroAddress
+  const chainId = Number(config.chainId)
+  const poolAddress = getPoolAddress(config.chainId)
+  const veratoAddress = getVeratoAddress(config.chainId)
+
+  // Hooks
+  const {
+    signPermission,
+    signedPermissions,
+    signing: signingPermission,
+    error: permitError,
+    clearSignatures,
+  } = usePermitSignatures(veratoAddress)
+
+  const {
+    submitOrder,
+    submitting,
+    submitted,
+    error: submitError,
+  } = useOrderSubmission(chainId)
 
   // Derive leaves from selection
-  const leafInputs = useMemo(
-    () => selectionToLeaves(config, poolAddress),
-    [config, poolAddress]
+  const leafInputs = useMemo(() => selectionToLeaves(config, poolAddress), [config, poolAddress])
+
+  // Derive required permission signatures
+  const permissionRequests = useMemo(
+    () => derivePermissionRequests(config),
+    [config],
   )
 
   // Build unsigned order for preview
@@ -161,12 +297,9 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
 
     const conditions: Condition[] = []
     if (minHealthFactor > 0) {
-      // Find distinct Aave pools used
       const pools = new Set<string>()
       for (const entry of config.entries) {
-        if (entry.protocol === 'aave') {
-          pools.add(poolAddress)
-        }
+        if (entry.protocol === 'aave') pools.add(poolAddress)
       }
       for (const pool of pools) {
         conditions.push({
@@ -186,61 +319,47 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
       solver: zeroAddress,
       minSolverReputation: minReputation,
       deadline,
-      chainId: Number(config.chainId),
+      chainId,
       veratoAddress,
     }
 
     return buildUnsignedOrder(input)
-  }, [leafInputs, minHealthFactor, maxFeeBps, deadlineMinutes, minReputation, config, poolAddress, veratoAddress])
+  }, [leafInputs, minHealthFactor, maxFeeBps, deadlineMinutes, minReputation, config, poolAddress, veratoAddress, chainId])
 
-  // Sign
-  const handleSign = useCallback(async () => {
-    if (!preview || leafInputs.length === 0) return
-    setError(null)
-    setSigning(true)
+  // Check which permits are still needed
+  const signedLabels = new Set(signedPermissions.map(p => p.request.label))
+  const pendingPermits = permissionRequests.filter(r => !signedLabels.has(r.label))
+  const allPermitsSigned = pendingPermits.length === 0 && permissionRequests.length > 0
 
-    try {
-      const ethereum = (window as any).ethereum
-      if (!ethereum) throw new Error('No wallet detected. Install MetaMask or similar.')
+  // Submit: sign order + send to backend
+  const handleSubmit = useCallback(async () => {
+    if (!preview) return
 
-      const [address] = await ethereum.request({ method: 'eth_requestAccounts' }) as string[]
-
-      const client = createWalletClient({
-        account: address as Address,
-        chain: celo,
-        transport: custom(ethereum),
+    const conditions: Condition[] = []
+    if (minHealthFactor > 0) {
+      conditions.push({
+        type: 'aave',
+        lenderId: 0,
+        pool: poolAddress,
+        minHealthFactor: BigInt(Math.floor(minHealthFactor * 1e18)),
       })
-
-      const conditions: Condition[] = []
-      if (minHealthFactor > 0) {
-        conditions.push({
-          type: 'aave',
-          lenderId: 0,
-          pool: poolAddress,
-          minHealthFactor: BigInt(Math.floor(minHealthFactor * 1e18)),
-        })
-      }
-
-      const deadline = Math.floor(Date.now() / 1000) + deadlineMinutes * 60
-
-      const result = await buildAndSignOrder(client, {
-        leaves: leafInputs,
-        conditions,
-        maxFeeBps,
-        solver: zeroAddress,
-        minSolverReputation: minReputation,
-        deadline,
-        chainId: Number(config.chainId),
-        veratoAddress,
-      })
-
-      setSignedOrder(result)
-    } catch (e: any) {
-      setError(e.message ?? String(e))
-    } finally {
-      setSigning(false)
     }
-  }, [preview, leafInputs, minHealthFactor, maxFeeBps, deadlineMinutes, minReputation, config, poolAddress, veratoAddress])
+
+    await submitOrder({
+      merkleRoot: preview.merkleRoot,
+      settlementData: preview.settlementData,
+      orderData: preview.orderData,
+      leaves: preview.leaves.map(l => ({
+        ...l,
+        label: leafInputs.find(li => li.op === l.op && li.lenderId === l.lenderId)?.label ?? '',
+      })),
+      permits: signedPermissions,
+      deadlineSeconds: deadlineMinutes * 60,
+      maxFeeBps,
+      solver: zeroAddress,
+      minSolverReputation: minReputation,
+    })
+  }, [preview, signedPermissions, deadlineMinutes, maxFeeBps, minReputation, minHealthFactor, poolAddress, leafInputs, submitOrder])
 
   if (leafInputs.length === 0) {
     return (
@@ -252,6 +371,39 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
 
   return (
     <div className="space-y-6">
+      {/* Wallet connection */}
+      <div className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
+        {isConnected ? (
+          <>
+            <div className="text-sm">
+              <span className="text-gray-400">Connected: </span>
+              <span className="font-mono text-emerald-400">{address?.slice(0, 6)}...{address?.slice(-4)}</span>
+            </div>
+            <button
+              onClick={() => disconnect()}
+              className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+            >
+              Disconnect
+            </button>
+          </>
+        ) : (
+          <div className="flex items-center gap-3 w-full">
+            <span className="text-sm text-gray-400">Connect wallet to sign</span>
+            <div className="flex gap-2 ml-auto">
+              {connectors.map((connector) => (
+                <button
+                  key={connector.uid}
+                  onClick={() => connect({ connector })}
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs rounded transition-colors"
+                >
+                  {connector.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Merkle leaves */}
       <div>
         <h3 className="text-sm font-medium text-gray-400 mb-2">
@@ -259,16 +411,8 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
         </h3>
         <div className="space-y-1 max-h-48 overflow-y-auto">
           {leafInputs.map((l, i) => (
-            <div
-              key={i}
-              className="flex items-center gap-2 px-3 py-1.5 bg-gray-800/60 rounded text-xs"
-            >
-              <span className={`px-1.5 py-0.5 rounded font-medium ${
-                l.op === 0 ? 'bg-green-600/20 text-green-400' :
-                l.op === 1 ? 'bg-red-600/20 text-red-400' :
-                l.op === 2 ? 'bg-blue-600/20 text-blue-400' :
-                'bg-yellow-600/20 text-yellow-400'
-              }`}>
+            <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-gray-800/60 rounded text-xs">
+              <span className={`px-1.5 py-0.5 rounded font-medium ${OP_COLORS[l.op] ?? 'bg-gray-600/20 text-gray-400'}`}>
                 {OP_NAMES[l.op]}
               </span>
               <span className="text-gray-300">{l.label}</span>
@@ -342,32 +486,134 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
         </div>
       )}
 
-      {/* Sign button */}
-      <button
-        onClick={handleSign}
-        disabled={signing || !preview}
-        className={`w-full py-3 rounded-lg font-medium text-sm transition-colors ${
-          signing
-            ? 'bg-gray-700 text-gray-400 cursor-wait'
-            : 'bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer'
-        }`}
-      >
-        {signing ? 'Signing...' : 'Sign Order with Wallet'}
-      </button>
+      {/* Permission Signatures */}
+      {permissionRequests.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-medium text-amber-400">
+              Required Signatures ({signedPermissions.length}/{permissionRequests.length})
+            </h3>
+            {signedPermissions.length > 0 && (
+              <button
+                onClick={clearSignatures}
+                className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                Clear all
+              </button>
+            )}
+          </div>
+          <div className="space-y-2">
+            {permissionRequests.map((req) => {
+              const signed = signedPermissions.find(p => p.request.label === req.label)
+              const isCurrentlySigning = signingPermission === req.label
 
-      {error && (
-        <div className="bg-red-900/30 border border-red-700/50 rounded-lg p-3 text-sm text-red-300">
-          {error}
+              return (
+                <div
+                  key={req.label}
+                  className={`flex items-center justify-between px-3 py-2.5 rounded-lg border transition-colors ${
+                    signed
+                      ? 'bg-emerald-600/10 border-emerald-500/30'
+                      : 'bg-gray-800/60 border-gray-700/50'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className={`w-2 h-2 rounded-full ${signed ? 'bg-emerald-400' : 'bg-gray-600'}`} />
+                    <div>
+                      <span className="text-sm text-white">{req.label}</span>
+                      <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${
+                        req.kind === 'ERC2612_PERMIT' ? 'bg-indigo-600/20 text-indigo-400' :
+                        req.kind === 'AAVE_DELEGATION' ? 'bg-red-600/20 text-red-400' :
+                        'bg-violet-600/20 text-violet-400'
+                      }`}>
+                        {req.kind === 'ERC2612_PERMIT' ? 'Permit' :
+                         req.kind === 'AAVE_DELEGATION' ? 'Delegation' :
+                         'Authorization'}
+                      </span>
+                    </div>
+                  </div>
+                  {signed ? (
+                    <span className="text-xs text-emerald-400">Signed</span>
+                  ) : (
+                    <button
+                      onClick={() => signPermission(req)}
+                      disabled={!isConnected || isCurrentlySigning}
+                      className={`px-3 py-1 text-xs rounded transition-colors ${
+                        isCurrentlySigning
+                          ? 'bg-gray-700 text-gray-400 cursor-wait'
+                          : 'bg-amber-600 hover:bg-amber-500 text-white'
+                      }`}
+                    >
+                      {isCurrentlySigning ? 'Signing...' : 'Sign'}
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          {permitError && (
+            <div className="mt-2 bg-red-900/30 border border-red-700/50 rounded-lg p-2 text-xs text-red-300">
+              {permitError}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Signed order output */}
-      {signedOrder && (
-        <div>
-          <h3 className="text-sm font-medium text-emerald-400 mb-2">Signed Order</h3>
-          <pre className="bg-gray-900 border border-emerald-800/40 rounded-lg p-4 text-xs text-gray-300 overflow-x-auto max-h-96 overflow-y-auto">
-            {JSON.stringify(signedOrder, (_k, v) => typeof v === 'bigint' ? v.toString() : v, 2)}
-          </pre>
+      {/* Sign All Remaining button */}
+      {pendingPermits.length > 1 && isConnected && (
+        <button
+          onClick={async () => {
+            for (const req of pendingPermits) {
+              await signPermission(req)
+            }
+          }}
+          disabled={!!signingPermission}
+          className={`w-full py-2 rounded-lg font-medium text-sm transition-colors ${
+            signingPermission
+              ? 'bg-gray-700 text-gray-400 cursor-wait'
+              : 'bg-amber-600 hover:bg-amber-500 text-white'
+          }`}
+        >
+          {signingPermission ? `Signing: ${signingPermission}` : `Sign All Remaining (${pendingPermits.length})`}
+        </button>
+      )}
+
+      {/* Submit Order button */}
+      <button
+        onClick={handleSubmit}
+        disabled={submitting || !preview || !isConnected || !allPermitsSigned}
+        className={`w-full py-3 rounded-lg font-medium text-sm transition-colors ${
+          submitting
+            ? 'bg-gray-700 text-gray-400 cursor-wait'
+            : !isConnected
+            ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+            : !allPermitsSigned
+            ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+            : 'bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer'
+        }`}
+      >
+        {submitting
+          ? 'Signing & Submitting...'
+          : !isConnected
+          ? 'Connect Wallet First'
+          : !allPermitsSigned
+          ? `Sign ${pendingPermits.length} Permission${pendingPermits.length > 1 ? 's' : ''} First`
+          : 'Sign Order & Submit'}
+      </button>
+
+      {submitError && (
+        <div className="bg-red-900/30 border border-red-700/50 rounded-lg p-3 text-sm text-red-300">
+          {submitError}
+        </div>
+      )}
+
+      {/* Success */}
+      {submitted && (
+        <div className="bg-emerald-900/30 border border-emerald-700/50 rounded-lg p-4 space-y-2">
+          <h3 className="text-sm font-medium text-emerald-400">Order Submitted</h3>
+          <div className="text-xs font-mono text-gray-300">
+            <div>ID: {submitted.id}</div>
+            <div>Status: {submitted.status}</div>
+          </div>
         </div>
       )}
     </div>

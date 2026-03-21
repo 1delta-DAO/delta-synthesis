@@ -1,9 +1,18 @@
 import { useState, useMemo } from 'react'
-import type { AaveTokensData, MorphoPoolsData, SelectionState, AaveSelection, TokenSelection, CollectedConfig, CollectedEntry } from '../types'
+import type {
+  AaveTokensData, MorphoPoolsData, SelectionState, AaveSelection,
+  TokenSelection, MorphoMarketSelection, CollectedConfig, CollectedEntry,
+} from '../types'
 import { CHAIN_NAMES } from '../types'
 import aaveTokensRaw from '../data/aave-tokens.json'
 import morphoPoolsRaw from '../data/morpho-pools.json'
 import OrderBuilder from './OrderBuilder'
+import {
+  useLendingData,
+  isAaveLender, isMorphoLender,
+  isMorphoMarket,
+  type LenderItem,
+} from '../hooks/useLendingData'
 
 const aaveTokens = aaveTokensRaw as AaveTokensData
 const morphoPools = morphoPoolsRaw as MorphoPoolsData
@@ -14,6 +23,16 @@ function shortenAddress(addr: string) {
 
 function chainName(id: string) {
   return CHAIN_NAMES[id] ?? `Chain ${id}`
+}
+
+function formatUsd(v: number): string {
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(2)}M`
+  if (v >= 1e3) return `$${(v / 1e3).toFixed(1)}K`
+  return `$${v.toFixed(2)}`
+}
+
+function formatRate(v: number): string {
+  return `${v.toFixed(2)}%`
 }
 
 /** Collect all unique chain IDs across both data sources */
@@ -37,11 +56,13 @@ function AaveForkSection({
   chainId,
   tokens,
   onChange,
+  lenderItem,
 }: {
   fork: string
   chainId: string
   tokens: Record<string, TokenSelection>
   onChange: (next: Record<string, TokenSelection>) => void
+  lenderItem?: LenderItem
 }) {
   const reserves = useMemo(() => aaveTokens[fork]?.[chainId] ?? {}, [fork, chainId])
 
@@ -68,23 +89,38 @@ function AaveForkSection({
       onChange({})
     } else {
       const all: Record<string, TokenSelection> = {}
-      for (const u of Object.keys(reserves)) {
-        all[u] = { collateral: true, debt: true }
-      }
+      for (const u of Object.keys(reserves)) all[u] = { collateral: true, debt: true }
       onChange(all)
     }
   }
 
   const hasSelections = Object.keys(tokens).length > 0
 
+  // Match live market data by underlying address
+  const getMarketData = (underlying: string) => {
+    if (!lenderItem) return null
+    return lenderItem.markets.find(m =>
+      m.underlyingInfo?.asset?.address?.toLowerCase() === underlying.toLowerCase()
+    )
+  }
+
   return (
     <div className="border border-gray-800 rounded-lg overflow-hidden">
       <div className={`flex items-center justify-between px-3 py-2 ${hasSelections ? 'bg-indigo-600/10' : 'bg-gray-900'}`}>
-        <span className="text-sm font-medium text-white">{fork.replace(/_/g, ' ')}</span>
-        <button
-          onClick={toggleAll}
-          className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-        >
+        <div className="flex items-center gap-2">
+          {lenderItem?.lenderInfo?.logoURI && (
+            <img src={lenderItem.lenderInfo.logoURI} alt="" className="w-5 h-5 rounded" />
+          )}
+          <span className="text-sm font-medium text-white">
+            {lenderItem?.lenderInfo?.name ?? fork.replace(/_/g, ' ')}
+          </span>
+          {lenderItem && (
+            <span className="text-xs text-gray-500">
+              TVL {formatUsd(lenderItem.tvlUsd)}
+            </span>
+          )}
+        </div>
+        <button onClick={toggleAll} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
           {allSelected ? 'Deselect all' : 'Select all'}
         </button>
       </div>
@@ -92,6 +128,7 @@ function AaveForkSection({
         {Object.entries(reserves).map(([underlying, entry]) => {
           const sel = tokens[underlying]
           const active = sel?.collateral || sel?.debt
+          const market = getMarketData(underlying)
           return (
             <div
               key={underlying}
@@ -100,10 +137,20 @@ function AaveForkSection({
               }`}
             >
               <div className="flex items-center gap-3">
+                {market?.underlyingInfo?.asset?.logoURI && (
+                  <img src={market.underlyingInfo.asset.logoURI} alt="" className="w-5 h-5 rounded-full" />
+                )}
                 <div className="flex-1 min-w-0">
                   <span className="font-medium text-white">{entry.symbol}</span>
                   <span className="ml-2 text-xs text-gray-500 font-mono">{shortenAddress(underlying)}</span>
                 </div>
+                {market && (
+                  <div className="flex gap-3 text-xs text-gray-500">
+                    <span>{formatUsd(market.totalDepositsUsd)} dep</span>
+                    <span className="text-emerald-500">{formatRate(market.depositRate)}</span>
+                    <span className="text-red-400">{formatRate(market.variableBorrowRate)}</span>
+                  </div>
+                )}
               </div>
               <div className="flex gap-4 mt-1.5 ml-0.5">
                 <label className="flex items-center gap-1.5 cursor-pointer">
@@ -141,10 +188,12 @@ function AavePanel({
   chainId,
   selection,
   onChange,
+  lenders,
 }: {
   chainId: string
   selection: AaveSelection
   onChange: (next: AaveSelection) => void
+  lenders: LenderItem[]
 }) {
   const forks = useMemo(
     () => Object.keys(aaveTokens).filter((fork) => chainId in (aaveTokens[fork] ?? {})),
@@ -166,102 +215,151 @@ function AavePanel({
 
   return (
     <div className="space-y-3">
-      {forks.map((fork) => (
-        <AaveForkSection
-          key={fork}
-          fork={fork}
-          chainId={chainId}
-          tokens={selection[fork] ?? {}}
-          onChange={(tokens) => updateFork(fork, tokens)}
-        />
-      ))}
+      {forks.map((fork) => {
+        const lenderItem = lenders.find(l => l.lenderKey === fork)
+        return (
+          <AaveForkSection
+            key={fork}
+            fork={fork}
+            chainId={chainId}
+            tokens={selection[fork] ?? {}}
+            onChange={(tokens) => updateFork(fork, tokens)}
+            lenderItem={lenderItem}
+          />
+        )
+      })}
     </div>
   )
 }
 
-// ── Morpho Panel ────────────────────────────────────────────────────────────
+// ── Morpho Markets Panel ────────────────────────────────────────────────────
 
-interface PoolEntry {
-  key: string // "POOL_TYPE:CHAIN_ID"
-  poolType: string
-  address: string
-}
-
-function MorphoPanel({
-  chainId,
+function MorphoMarketsPanel({
+  lenders,
   selection,
   onChange,
 }: {
-  chainId: string
-  selection: SelectionState['morpho']
-  onChange: (next: SelectionState['morpho']) => void
+  lenders: LenderItem[]
+  selection: Record<string, MorphoMarketSelection>
+  onChange: (next: Record<string, MorphoMarketSelection>) => void
 }) {
-  const pools = useMemo(() => {
-    const entries: PoolEntry[] = []
-    for (const [poolType, chains] of Object.entries(morphoPools)) {
-      const address = chains[chainId]
-      if (address) {
-        entries.push({ key: `${poolType}:${chainId}`, poolType, address })
-      }
-    }
-    return entries
-  }, [chainId])
+  const morphoLenders = lenders.filter(l => isMorphoLender(l.lenderKey))
 
-  const togglePool = (key: string) => {
-    const next = selection.pools.includes(key)
-      ? selection.pools.filter((k) => k !== key)
-      : [...selection.pools, key]
-    onChange({ pools: next })
+  if (morphoLenders.length === 0) {
+    return <p className="text-sm text-gray-600">No Morpho markets on this chain.</p>
   }
 
-  const allSelected = pools.length > 0 && pools.every((p) => selection.pools.includes(p.key))
+  const allMarkets = morphoLenders.flatMap(l =>
+    l.markets.filter(isMorphoMarket).map(m => ({ market: m, lender: l }))
+  )
+
+  const toggle = (uid: string, field: 'collateral' | 'debt') => {
+    const current = selection[uid]
+    if (current) {
+      const next = { ...current, [field]: !current[field] }
+      if (!next.collateral && !next.debt) {
+        const rest = { ...selection }
+        delete rest[uid]
+        onChange(rest)
+      } else {
+        onChange({ ...selection, [uid]: next })
+      }
+    } else {
+      onChange({
+        ...selection,
+        [uid]: { collateral: field === 'collateral', debt: field === 'debt' },
+      })
+    }
+  }
+
+  const allSelected = allMarkets.length > 0 && allMarkets.every(({ market }) => {
+    const s = selection[market.marketUid]
+    return s?.collateral && s?.debt
+  })
+
   const toggleAll = () => {
     if (allSelected) {
-      const poolKeys = new Set(pools.map((p) => p.key))
-      onChange({ pools: selection.pools.filter((k) => !poolKeys.has(k)) })
+      onChange({})
     } else {
-      const existing = new Set(selection.pools)
-      onChange({ pools: [...selection.pools, ...pools.filter((p) => !existing.has(p.key)).map((p) => p.key)] })
+      const all: Record<string, MorphoMarketSelection> = {}
+      for (const { market } of allMarkets) {
+        all[market.marketUid] = { collateral: true, debt: true }
+      }
+      onChange(all)
     }
-  }
-
-  if (pools.length === 0) {
-    return <p className="text-sm text-gray-600">No Morpho pools on {chainName(chainId)}.</p>
   }
 
   return (
-    <div className="space-y-4">
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-sm font-medium text-gray-400">Pools</label>
-          <button
-            onClick={toggleAll}
-            className="text-xs text-violet-400 hover:text-violet-300 transition-colors"
-          >
+    <div className="space-y-3">
+      <div className="border border-gray-800 rounded-lg overflow-hidden">
+        <div className="flex items-center justify-between px-3 py-2 bg-gray-900">
+          <div className="flex items-center gap-2">
+            {morphoLenders[0]?.lenderInfo?.logoURI && (
+              <img src={morphoLenders[0].lenderInfo.logoURI} alt="" className="w-5 h-5 rounded" />
+            )}
+            <span className="text-sm font-medium text-white">Morpho Blue Markets</span>
+            <span className="text-xs text-gray-500">{allMarkets.length} markets</span>
+          </div>
+          <button onClick={toggleAll} className="text-xs text-violet-400 hover:text-violet-300 transition-colors">
             {allSelected ? 'Deselect all' : 'Select all'}
           </button>
         </div>
-        <div className="space-y-1 max-h-80 overflow-y-auto pr-1">
-          {pools.map((pool) => {
-            const checked = selection.pools.includes(pool.key)
+        <div className="space-y-1 p-2 max-h-80 overflow-y-auto">
+          {allMarkets.map(({ market }) => {
+            const mp = market.params.market
+            const sel = selection[market.marketUid]
+            const active = sel?.collateral || sel?.debt
+            // Derive collateral symbol from the market name or address
+            const loanSymbol = market.underlyingInfo?.asset?.symbol ?? shortenAddress(mp.loanAddress)
+            const collateralShort = shortenAddress(mp.collateralAddress)
+            const lltv = (Number(mp.lltv) / 1e18 * 100).toFixed(1)
+
             return (
-              <label
-                key={pool.key}
-                className={`flex items-center gap-3 px-3 py-2 rounded cursor-pointer transition-colors ${
-                  checked ? 'bg-violet-600/20 border border-violet-500/40' : 'bg-gray-800/60 border border-transparent hover:bg-gray-800'
+              <div
+                key={market.marketUid}
+                className={`px-3 py-2 rounded transition-colors ${
+                  active ? 'bg-violet-600/20 border border-violet-500/40' : 'bg-gray-800/60 border border-transparent'
                 }`}
               >
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => togglePool(pool.key)}
-                  className="accent-violet-500 w-4 h-4"
-                />
-                <div className="flex-1 min-w-0">
-                  <span className="font-medium text-white">{pool.poolType.replace(/_/g, ' ')}</span>
+                <div className="flex items-center gap-3">
+                  {market.underlyingInfo?.asset?.logoURI && (
+                    <img src={market.underlyingInfo.asset.logoURI} alt="" className="w-5 h-5 rounded-full" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <span className="font-medium text-white">{market.name ?? loanSymbol}</span>
+                  </div>
+                  <div className="flex gap-3 text-xs text-gray-500">
+                    <span>LLTV {lltv}%</span>
+                    <span>{formatUsd(market.tvlUsd)} TVL</span>
+                    <span className="text-emerald-500">{formatRate(market.depositRate)}</span>
+                    <span className="text-red-400">{formatRate(market.variableBorrowRate)}</span>
+                  </div>
                 </div>
-                <span className="text-xs text-gray-500 font-mono">{shortenAddress(pool.address)}</span>
-              </label>
+                <div className="flex gap-3 mt-1 text-xs text-gray-600 font-mono">
+                  <span>Loan: {loanSymbol} ({shortenAddress(mp.loanAddress)})</span>
+                  <span>Collateral: {collateralShort}</span>
+                </div>
+                <div className="flex gap-4 mt-1.5 ml-0.5">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={sel?.collateral ?? false}
+                      onChange={() => toggle(market.marketUid, 'collateral')}
+                      className="accent-violet-500 w-3.5 h-3.5"
+                    />
+                    <span className="text-xs text-gray-400">Supply Collateral</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={sel?.debt ?? false}
+                      onChange={() => toggle(market.marketUid, 'debt')}
+                      className="accent-violet-500 w-3.5 h-3.5"
+                    />
+                    <span className="text-xs text-gray-400">Borrow</span>
+                  </label>
+                </div>
+              </div>
             )
           })}
         </div>
@@ -275,8 +373,8 @@ function MorphoPanel({
 function SelectionSummary({ selection }: { selection: SelectionState }) {
   const aaveForks = Object.entries(selection.aave).filter(([, tokens]) => Object.keys(tokens).length > 0)
   const aaveCount = aaveForks.reduce((sum, [, tokens]) => sum + Object.keys(tokens).length, 0)
-  const morphoCount = selection.morpho.pools.length
-  const total = aaveCount + morphoCount
+  const morphoMarketCount = Object.keys(selection.morphoMarkets).length
+  const total = aaveCount + morphoMarketCount
 
   if (total === 0) {
     return (
@@ -315,15 +413,15 @@ function SelectionSummary({ selection }: { selection: SelectionState }) {
         </div>
       ))}
 
-      {morphoCount > 0 && (
+      {morphoMarketCount > 0 && (
         <div>
-          <h4 className="text-xs text-violet-400 mb-1">Morpho Pools</h4>
+          <h4 className="text-xs text-violet-400 mb-1">Morpho Markets</h4>
           <div className="flex flex-wrap gap-1.5">
-            {selection.morpho.pools.map((key) => {
-              const [poolType, cId] = key.split(':')
+            {Object.entries(selection.morphoMarkets).map(([uid, sel]) => {
+              const roles = [sel.collateral && 'collateral', sel.debt && 'borrow'].filter(Boolean).join(', ')
               return (
-                <span key={key} className="text-xs bg-violet-600/20 text-violet-300 px-2 py-0.5 rounded border border-violet-500/30">
-                  {poolType.replace(/_/g, ' ')} &middot; {chainName(cId)}
+                <span key={uid} className="text-xs bg-violet-600/20 text-violet-300 px-2 py-0.5 rounded border border-violet-500/30">
+                  {uid.split(':')[0]?.replace(/_/g, ' ').slice(0, 20)}… ({roles})
                 </span>
               )
             })}
@@ -336,11 +434,14 @@ function SelectionSummary({ selection }: { selection: SelectionState }) {
 
 // ── Collected Config ─────────────────────────────────────────────────────────
 
-function useCollectedConfig(selection: SelectionState): CollectedConfig {
+function useCollectedConfig(
+  selection: SelectionState,
+  lenders: LenderItem[],
+): CollectedConfig {
   return useMemo(() => {
     const entries: CollectedEntry[] = []
 
-    // Aave entries — one per fork with selections
+    // Aave entries
     for (const [fork, tokens] of Object.entries(selection.aave)) {
       const tokenEntries = Object.entries(tokens)
       if (tokenEntries.length === 0) continue
@@ -361,37 +462,69 @@ function useCollectedConfig(selection: SelectionState): CollectedConfig {
       })
     }
 
-    // Morpho entries
-    for (const key of selection.morpho.pools) {
-      const [poolType, cId] = key.split(':')
-      const address = morphoPools[poolType]?.[cId]
-      if (address) {
-        entries.push({ protocol: 'morpho', poolType, chainId: cId, address })
+    // Morpho market entries — find the market data from lenders
+    for (const [marketUid, sel] of Object.entries(selection.morphoMarkets)) {
+      for (const lender of lenders) {
+        if (!isMorphoLender(lender.lenderKey)) continue
+        const market = lender.markets.find(m => m.marketUid === marketUid)
+        if (!market || !isMorphoMarket(market)) continue
+        const mp = market.params.market
+
+        // Find the Morpho Blue singleton address from morpho-pools.json
+        // or derive from lender data
+        let morphoAddress = ''
+        for (const [poolType, chains] of Object.entries(morphoPools)) {
+          if (poolType.startsWith('MORPHO')) {
+            const addr = chains[selection.chainId]
+            if (addr) { morphoAddress = addr; break }
+          }
+        }
+
+        entries.push({
+          protocol: 'morpho-market',
+          lenderKey: lender.lenderKey,
+          chainId: selection.chainId,
+          morphoAddress,
+          marketId: market.marketUid,
+          loanToken: mp.loanAddress,
+          collateralToken: mp.collateralAddress,
+          oracle: mp.oracle,
+          irm: mp.irm,
+          lltv: mp.lltv,
+          loanSymbol: market.underlyingInfo?.asset?.symbol ?? shortenAddress(mp.loanAddress),
+          collateralSymbol: shortenAddress(mp.collateralAddress),
+          selectedCollateral: sel.collateral,
+          selectedDebt: sel.debt,
+        })
+        break
       }
     }
 
     return { chainId: selection.chainId, entries }
-  }, [selection])
+  }, [selection, lenders])
 }
 
 // ── Main Configurator ───────────────────────────────────────────────────────
 
 export default function Configurator() {
   const [selection, setSelection] = useState<SelectionState>({
-    chainId: '',
+    chainId: '42220',
     aave: {},
     morpho: { pools: [] },
+    morphoMarkets: {},
   })
 
-  const config = useCollectedConfig(selection)
+  const { lenders, loading } = useLendingData(selection.chainId || null)
+  const aaveLenders = lenders.filter(l => isAaveLender(l.lenderKey))
+  const config = useCollectedConfig(selection, lenders)
 
   const setChain = (chainId: string) => {
-    setSelection({ chainId, aave: {}, morpho: { pools: [] } })
+    setSelection({ chainId, aave: {}, morpho: { pools: [] }, morphoMarkets: {} })
   }
 
   return (
     <div className="w-full max-w-2xl mx-auto space-y-8">
-      {/* Unified chain selector */}
+      {/* Chain selector */}
       <div>
         <label className="block text-sm font-medium text-gray-400 mb-2">Chain</label>
         <div className="flex flex-wrap gap-2">
@@ -411,25 +544,32 @@ export default function Configurator() {
         </div>
       </div>
 
-      {selection.chainId && (
+      {loading && (
+        <div className="text-center py-4 text-gray-500 text-sm">
+          Loading market data...
+        </div>
+      )}
+
+      {selection.chainId && !loading && (
         <>
           {/* Aave section */}
           <section>
-            <h2 className="text-lg font-semibold text-indigo-400 mb-3">Aave Tokens</h2>
+            <h2 className="text-lg font-semibold text-indigo-400 mb-3">Aave / Lending Protocols</h2>
             <AavePanel
               chainId={selection.chainId}
               selection={selection.aave}
               onChange={(aave) => setSelection((s) => ({ ...s, aave }))}
+              lenders={aaveLenders}
             />
           </section>
 
-          {/* Morpho section */}
+          {/* Morpho Markets section */}
           <section>
-            <h2 className="text-lg font-semibold text-violet-400 mb-3">Morpho Pools</h2>
-            <MorphoPanel
-              chainId={selection.chainId}
-              selection={selection.morpho}
-              onChange={(morpho) => setSelection((s) => ({ ...s, morpho }))}
+            <h2 className="text-lg font-semibold text-violet-400 mb-3">Morpho Blue Markets</h2>
+            <MorphoMarketsPanel
+              lenders={lenders}
+              selection={selection.morphoMarkets}
+              onChange={(morphoMarkets) => setSelection((s) => ({ ...s, morphoMarkets }))}
             />
           </section>
         </>
@@ -446,16 +586,6 @@ export default function Configurator() {
           <h2 className="text-lg font-semibold text-emerald-400 mb-3">Build Order</h2>
           <OrderBuilder config={config} />
         </section>
-      )}
-
-      {/* Collected config output */}
-      {config.entries.length > 0 && (
-        <div className="border-t border-gray-800 pt-4">
-          <h3 className="text-sm font-medium text-gray-400 mb-2">Collected Config</h3>
-          <pre className="bg-gray-900 border border-gray-800 rounded-lg p-4 text-xs text-gray-300 overflow-x-auto max-h-96 overflow-y-auto">
-            {JSON.stringify(config, null, 2)}
-          </pre>
-        </div>
       )}
     </div>
   )
