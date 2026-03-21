@@ -11,9 +11,30 @@
  * Anthropic is preferred.
  */
 
-import { createWalletClient, createPublicClient, http, type Hex, type Address } from 'viem'
+import { createWalletClient, http, maxUint256, type Hex, type Address } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { celo } from 'viem/chains'
+import {
+  encodePermit,
+  encodeAaveDelegation,
+  encodeMorphoAuthorization,
+  encodeApproveToken,
+  encodeSettle,
+  veratoAbi,
+  LenderRange,
+} from '@delta-synthesis/settlement-sdk'
+import type { StoredPermit } from './order.js'
+
+// Multicall ABI fragment (mutable copy to avoid const narrowing issues with writeContract)
+const multicallAbi = [
+  {
+    name: 'multicall' as const,
+    type: 'function' as const,
+    stateMutability: 'nonpayable' as const,
+    inputs: [{ name: 'data', type: 'bytes[]' as const }],
+    outputs: [],
+  },
+]
 
 export interface Env {
   ANTHROPIC_API_KEY?: string
@@ -25,27 +46,6 @@ export interface Env {
   RPC_URL: string
   ORDERS_API_URL: string
 }
-
-// ── Verato ABI (settle function) ────────────────────────────────────────
-
-const vertatoSettleAbi = [
-  {
-    name: 'settle',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'maxFeeBps', type: 'uint256' },
-      { name: 'solver', type: 'address' },
-      { name: 'minSolverReputation', type: 'uint256' },
-      { name: 'deadline', type: 'uint48' },
-      { name: 'signature', type: 'bytes' },
-      { name: 'orderData', type: 'bytes' },
-      { name: 'executionData', type: 'bytes' },
-      { name: 'fillerCalldata', type: 'bytes' },
-    ],
-    outputs: [],
-  },
-] as const
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -72,6 +72,7 @@ interface OpenOrder {
       proof: Hex[]
     }>
   }
+  permits?: StoredPermit[]
 }
 
 // ── LLM reasoning ──────────────────────────────────────────────────────
@@ -190,6 +191,133 @@ async function evaluateOrder(
 
 // ── Settlement execution ────────────────────────────────────────────────
 
+/**
+ * Build multicall bundle: permits + token approvals + settle.
+ *
+ * The agent bundles everything into one atomic multicall so that:
+ * 1. User permit signatures (aToken permits, vToken delegation, Morpho auth) are forwarded
+ * 2. Token approvals for pools (needed for deposit/repay) are set
+ * 3. The actual settle() call executes
+ */
+function buildMulticallData(
+  env: Env,
+  order: OpenOrder,
+  fillerCalldata: Hex,
+): Hex[] {
+  const verato = env.VERATO_ADDRESS as Address
+  const calls: Hex[] = []
+
+  // 1. Forward user permit signatures
+  for (const p of order.permits ?? []) {
+    const sig = p.signature
+    switch (p.kind) {
+      case 'ERC2612_PERMIT':
+        calls.push(encodePermit({
+          token: p.targetAddress,
+          owner: order.signer as Address,
+          spender: verato,
+          value: maxUint256,
+          deadline: BigInt(p.deadline),
+          v: sig.v,
+          r: sig.r,
+          s: sig.s,
+        }))
+        break
+
+      case 'AAVE_DELEGATION':
+        calls.push(encodeAaveDelegation({
+          debtToken: p.targetAddress,
+          delegator: order.signer as Address,
+          delegatee: verato,
+          value: maxUint256,
+          deadline: BigInt(p.deadline),
+          v: sig.v,
+          r: sig.r,
+          s: sig.s,
+        }))
+        break
+
+      case 'MORPHO_AUTHORIZATION':
+        calls.push(encodeMorphoAuthorization({
+          morpho: p.targetAddress,
+          authorizer: order.signer as Address,
+          authorized: verato,
+          isAuthorized: true,
+          nonce: BigInt(p.nonce),
+          deadline: BigInt(p.deadline),
+          v: sig.v,
+          r: sig.r,
+          s: sig.s,
+        }))
+        break
+
+      case 'AAVE_DELEGATION_TX':
+        // Already executed on-chain by the user, no action needed
+        break
+    }
+  }
+
+  // 2. Approve tokens to pools for DEPOSIT and REPAY operations
+  //
+  // Leaf data layout by op:
+  //   DEPOSIT (0): [20: pool]                          — asset comes from executionData
+  //   REPAY   (2): [1: mode][20: debtToken][20: pool]  — asset comes from executionData
+  //
+  // For Morpho ops (lenderId 4000+), the data layout is different:
+  //   [20: loanToken][20: collateralToken][20: oracle][20: irm][16: lltv][1: flags][20: morpho]
+  //
+  // We can't know the exact deposited/repaid token from leaf data alone (it's in
+  // executionData), but approveToken is permissionless and idempotent — the contract
+  // never holds persistent balances, so max-approving is safe.
+  //
+  // For Aave-family deposits/repays we extract the pool and approve common Celo assets.
+  // For Morpho we don't need pool approvals (Morpho uses transferFrom from the caller).
+  const approvedPools = new Set<string>()
+  const CELO_ASSETS: Address[] = [
+    '0x765DE816845861e75A25fCA122bb6898B8B1282a', // cUSD
+    '0xD221812de1BD094f35587EE8E174B07B6167D9Af', // WETH
+    '0xcebA9300f2b948710d2653dD7B07f33A8B32118C', // USDC
+    '0x48065fbBE25f71C9282ddf5e1cd6D6A887483D5e', // USDT
+    '0xd8763CBa276a3738E6DE85b4b3bF5FDed6D6cA73', // cEUR
+    '0x471EcE3750Da237f93B8E339c536989b8978a438', // CELO
+    '0xe8537a3d056DA446677B9e9d6c5dB704EaAb4787', // cREAL
+  ]
+
+  for (const leaf of order.order.leaves) {
+    const isAaveFamily = leaf.lenderId <= LenderRange.AAVE_V2.max
+    if (!isAaveFamily) continue
+
+    let pool: Address | null = null
+    if (leaf.op === 0 /* DEPOSIT */) {
+      pool = `0x${leaf.data.slice(2, 42)}` as Address
+    } else if (leaf.op === 2 /* REPAY */) {
+      // [1: mode][20: debtToken][20: pool]
+      pool = `0x${leaf.data.slice(42, 82)}` as Address
+    }
+
+    if (pool && !approvedPools.has(pool.toLowerCase())) {
+      approvedPools.add(pool.toLowerCase())
+      for (const asset of CELO_ASSETS) {
+        calls.push(encodeApproveToken(asset, pool))
+      }
+    }
+  }
+
+  // 3. Encode the settle call
+  calls.push(encodeSettle({
+    maxFeeBps: BigInt(order.order.maxFeeBps),
+    solver: order.order.solver,
+    minSolverReputation: BigInt(order.order.minSolverReputation),
+    deadline: order.order.deadline,
+    signature: order.signature,
+    orderData: order.order.orderData,
+    executionData: order.order.executionData,
+    fillerCalldata,
+  }))
+
+  return calls
+}
+
 async function executeSettlement(env: Env, order: OpenOrder, fillerCalldata: Hex): Promise<Hex> {
   const account = privateKeyToAccount(env.PRIVATE_KEY as Hex)
 
@@ -199,20 +327,34 @@ async function executeSettlement(env: Env, order: OpenOrder, fillerCalldata: Hex
     transport: http(env.RPC_URL),
   })
 
+  const calls = buildMulticallData(env, order, fillerCalldata)
+
+  // If there's only the settle call (no permits), call settle directly
+  // Otherwise use multicall to batch permits + approvals + settle
+  if (calls.length === 1) {
+    const txHash = await walletClient.writeContract({
+      address: env.VERATO_ADDRESS as Address,
+      abi: veratoAbi,
+      functionName: 'settle',
+      args: [
+        BigInt(order.order.maxFeeBps),
+        order.order.solver,
+        BigInt(order.order.minSolverReputation),
+        order.order.deadline,
+        order.signature,
+        order.order.orderData,
+        order.order.executionData,
+        fillerCalldata,
+      ],
+    })
+    return txHash
+  }
+
   const txHash = await walletClient.writeContract({
     address: env.VERATO_ADDRESS as Address,
-    abi: vertatoSettleAbi,
-    functionName: 'settle',
-    args: [
-      BigInt(order.order.maxFeeBps),
-      order.order.solver,
-      BigInt(order.order.minSolverReputation),
-      order.order.deadline,
-      order.signature,
-      order.order.orderData,
-      order.order.executionData,
-      fillerCalldata,
-    ],
+    abi: multicallAbi,
+    functionName: 'multicall',
+    args: [calls],
   })
 
   return txHash

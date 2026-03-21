@@ -46,9 +46,10 @@ const _noncesAbi = [{ name: '_nonces', type: 'function', inputs: [{ type: 'addre
 const nameAbi = [{ name: 'name', type: 'function', inputs: [], outputs: [{ type: 'string' }], stateMutability: 'view' }] as const
 const approveDelegationAbi = [{ name: 'approveDelegation', type: 'function', inputs: [{ name: 'delegatee', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [], stateMutability: 'nonpayable' }] as const
 
-// Default deadline: 1 hour from now
+// Default deadline: 24 hours from now — permits should outlive the order
+// so agents have time to fill without the permit expiring first.
 function getDeadline(): bigint {
-  return BigInt(Math.floor(Date.now() / 1000) + 3600)
+  return BigInt(Math.floor(Date.now() / 1000) + 86400)
 }
 
 export function usePermitSignatures(settlementAddress: Address) {

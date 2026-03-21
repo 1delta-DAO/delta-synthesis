@@ -9,6 +9,14 @@ export interface Env {
   DB: D1Database
 }
 
+interface PermitBody {
+  kind: string  // ERC2612_PERMIT | AAVE_DELEGATION | MORPHO_AUTHORIZATION | AAVE_DELEGATION_TX
+  targetAddress: string
+  signature: { v: number; r: string; s: string }
+  deadline: string
+  nonce: string
+}
+
 interface SignedOrderBody {
   signer: string
   signature: string
@@ -31,6 +39,7 @@ interface SignedOrderBody {
       proof: string[]
     }>
   }
+  permits?: PermitBody[]
 }
 
 function generateId(): string {
@@ -62,8 +71,8 @@ async function handleCreateOrder(request: Request, env: Env): Promise<Response> 
   const o = body.order
 
   await env.DB.prepare(
-    `INSERT INTO orders (id, signer, signature, merkle_root, deadline, chain_id, max_fee_bps, solver, min_solver_reputation, settlement_data, order_data, execution_data, filler_calldata, leaves, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`
+    `INSERT INTO orders (id, signer, signature, merkle_root, deadline, chain_id, max_fee_bps, solver, min_solver_reputation, settlement_data, order_data, execution_data, filler_calldata, leaves, permits, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`
   )
     .bind(
       id,
@@ -79,7 +88,8 @@ async function handleCreateOrder(request: Request, env: Env): Promise<Response> 
       o.orderData,
       o.executionData,
       o.fillerCalldata,
-      JSON.stringify(o.leaves)
+      JSON.stringify(o.leaves),
+      JSON.stringify(body.permits ?? [])
     )
     .run()
 
@@ -144,6 +154,7 @@ async function handleGetOrders(request: Request, env: Env): Promise<Response> {
       minSolverReputation: row.min_solver_reputation,
       leaves: JSON.parse(row.leaves as string),
     },
+    permits: JSON.parse((row.permits as string) || '[]'),
   }))
 
   return json(orders)
@@ -174,6 +185,7 @@ async function handleGetOrder(id: string, env: Env): Promise<Response> {
       minSolverReputation: row.min_solver_reputation,
       leaves: JSON.parse(row.leaves as string),
     },
+    permits: JSON.parse((row.permits as string) || '[]'),
   })
 }
 

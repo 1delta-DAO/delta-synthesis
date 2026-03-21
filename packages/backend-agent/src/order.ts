@@ -23,6 +23,14 @@ export interface MerkleLeaf {
   proof: Hex[]
 }
 
+export interface StoredPermit {
+  kind: 'ERC2612_PERMIT' | 'AAVE_DELEGATION' | 'AAVE_DELEGATION_TX' | 'MORPHO_AUTHORIZATION'
+  targetAddress: Address
+  signature: { v: number; r: Hex; s: Hex }
+  deadline: string
+  nonce: string
+}
+
 export interface StoredOrder {
   id: string
   createdAt: number
@@ -43,6 +51,7 @@ export interface StoredOrder {
     minSolverReputation: number
     leaves: MerkleLeaf[]
   }
+  permits: StoredPermit[]
 }
 
 // ─── Numeric lender ID → protocol string ────────────────────────────────────

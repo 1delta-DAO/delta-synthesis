@@ -11,6 +11,8 @@ packages/contracts/cache/
 
 # Cloudflare
 wrangler.toml
+.wrangler/
+.dev.vars
 
 # IDE
 .vscode/

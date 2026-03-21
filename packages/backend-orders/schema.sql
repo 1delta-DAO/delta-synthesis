@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS orders (
   execution_data TEXT NOT NULL,
   filler_calldata TEXT NOT NULL,
   leaves TEXT NOT NULL,          -- JSON array of MerkleLeaf
+  permits TEXT NOT NULL DEFAULT '[]',  -- JSON array of user permit/delegation signatures
   status TEXT NOT NULL DEFAULT 'open',  -- open | filled | cancelled | expired
   tx_hash TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),

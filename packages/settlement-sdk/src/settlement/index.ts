@@ -35,7 +35,21 @@ export {
 export { signOrder, getVeratoDomain, veratoOrderTypes, VERATO_DOMAIN } from "./sign.js";
 
 // Calldata
-export { encodeSettle, encodeSettleWithFlashLoan, veratoAbi } from "./calldata.js";
+export {
+  encodeSettle,
+  encodeSettleWithFlashLoan,
+  encodeApproveToken,
+  encodePermit,
+  encodeAaveDelegation,
+  encodeMorphoAuthorization,
+  encodeMulticall,
+  veratoAbi,
+} from "./calldata.js";
+export type {
+  PermitParams,
+  AaveDelegationParams,
+  MorphoAuthorizationParams,
+} from "./calldata.js";
 
 // Builder
 export { SettlementBuilder } from "./builder.js";

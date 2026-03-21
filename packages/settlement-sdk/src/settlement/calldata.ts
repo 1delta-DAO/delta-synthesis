@@ -1,5 +1,6 @@
 import {
   encodeFunctionData,
+  maxUint256,
   type Address,
   type Hex,
 } from "viem";
@@ -49,7 +50,97 @@ const settleWithFlashLoanAbi = [
   },
 ] as const;
 
-export const veratoAbi = [...settleAbi, ...settleWithFlashLoanAbi] as const;
+const approveTokenAbi = [
+  {
+    name: "approveToken",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [],
+  },
+] as const;
+
+const permitAbi = [
+  {
+    name: "permit",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "v", type: "uint8" },
+      { name: "r", type: "bytes32" },
+      { name: "s", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+] as const;
+
+const aaveDelegationWithSigAbi = [
+  {
+    name: "aaveDelegationWithSig",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "debtToken", type: "address" },
+      { name: "delegator", type: "address" },
+      { name: "delegatee", type: "address" },
+      { name: "value", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "v", type: "uint8" },
+      { name: "r", type: "bytes32" },
+      { name: "s", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+] as const;
+
+const morphoSetAuthorizationWithSigAbi = [
+  {
+    name: "morphoSetAuthorizationWithSig",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "morpho", type: "address" },
+      { name: "authorizer", type: "address" },
+      { name: "authorized", type: "address" },
+      { name: "isAuthorized", type: "bool" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "v", type: "uint8" },
+      { name: "r", type: "bytes32" },
+      { name: "s", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+] as const;
+
+const multicallAbi = [
+  {
+    name: "multicall",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "data", type: "bytes[]" }],
+    outputs: [],
+  },
+] as const;
+
+export const veratoAbi = [
+  ...settleAbi,
+  ...settleWithFlashLoanAbi,
+  ...approveTokenAbi,
+  ...permitAbi,
+  ...aaveDelegationWithSigAbi,
+  ...morphoSetAuthorizationWithSigAbi,
+  ...multicallAbi,
+] as const;
 
 // ── Calldata builders ───────────────────────────────────────────────────
 
@@ -96,5 +187,116 @@ export function encodeSettleWithFlashLoan(
       params.executionData,
       params.fillerCalldata,
     ],
+  });
+}
+
+// ── Multicall helpers ───────────────────────────────────────────────────
+
+export interface PermitParams {
+  token: Address;
+  owner: Address;
+  spender: Address;
+  value: bigint;
+  deadline: bigint;
+  v: number;
+  r: Hex;
+  s: Hex;
+}
+
+export interface AaveDelegationParams {
+  debtToken: Address;
+  delegator: Address;
+  delegatee: Address;
+  value: bigint;
+  deadline: bigint;
+  v: number;
+  r: Hex;
+  s: Hex;
+}
+
+export interface MorphoAuthorizationParams {
+  morpho: Address;
+  authorizer: Address;
+  authorized: Address;
+  isAuthorized: boolean;
+  nonce: bigint;
+  deadline: bigint;
+  v: number;
+  r: Hex;
+  s: Hex;
+}
+
+/** Encode approveToken(token, spender, max) for multicall. */
+export function encodeApproveToken(token: Address, spender: Address): Hex {
+  return encodeFunctionData({
+    abi: approveTokenAbi,
+    functionName: "approveToken",
+    args: [token, spender, maxUint256],
+  });
+}
+
+/** Encode a permit call for multicall (aToken ERC-2612 permit). */
+export function encodePermit(params: PermitParams): Hex {
+  return encodeFunctionData({
+    abi: permitAbi,
+    functionName: "permit",
+    args: [
+      params.token,
+      params.owner,
+      params.spender,
+      params.value,
+      params.deadline,
+      params.v,
+      params.r,
+      params.s,
+    ],
+  });
+}
+
+/** Encode Aave V3 delegationWithSig for multicall (vToken credit delegation). */
+export function encodeAaveDelegation(params: AaveDelegationParams): Hex {
+  return encodeFunctionData({
+    abi: aaveDelegationWithSigAbi,
+    functionName: "aaveDelegationWithSig",
+    args: [
+      params.debtToken,
+      params.delegator,
+      params.delegatee,
+      params.value,
+      params.deadline,
+      params.v,
+      params.r,
+      params.s,
+    ],
+  });
+}
+
+/** Encode Morpho setAuthorizationWithSig for multicall. */
+export function encodeMorphoAuthorization(
+  params: MorphoAuthorizationParams
+): Hex {
+  return encodeFunctionData({
+    abi: morphoSetAuthorizationWithSigAbi,
+    functionName: "morphoSetAuthorizationWithSig",
+    args: [
+      params.morpho,
+      params.authorizer,
+      params.authorized,
+      params.isAuthorized,
+      params.nonce,
+      params.deadline,
+      params.v,
+      params.r,
+      params.s,
+    ],
+  });
+}
+
+/** Encode multicall(data[]) wrapping multiple calls into one tx. */
+export function encodeMulticall(calls: Hex[]): Hex {
+  return encodeFunctionData({
+    abi: multicallAbi,
+    functionName: "multicall",
+    args: [calls],
   });
 }
