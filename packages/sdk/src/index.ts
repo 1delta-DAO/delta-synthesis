@@ -1,4 +1,5 @@
-export { fetchSwapRoute, getOutputAmount, getGasFeeUSD } from './swap.js'
+export { fetchSwapRoute, getOutputAmount, getGasFeeUSD, buildFillerSwap, fillerSwapFromQuote } from './swap.js'
+export type { BuildFillerSwapRequest } from './swap.js'
 export type {
   SwapRouteRequest,
   QuoteResponse,

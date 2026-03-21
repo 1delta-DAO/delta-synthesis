@@ -40,6 +40,11 @@ export interface ClassicQuote {
     gasFee: string
     gasFeeUSD: string
     gasUseEstimate: string
+    methodParameters?: {
+      calldata: string
+      value: string
+      to: string
+    }
   }
   permitData: unknown | null
 }

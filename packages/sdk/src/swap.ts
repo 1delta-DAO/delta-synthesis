@@ -1,3 +1,5 @@
+import type { Address, Hex } from 'viem'
+import type { FillerSwap } from './settlement/types.js'
 import type {
   SwapRouteRequest,
   QuoteResponse,
@@ -80,4 +82,107 @@ export function getGasFeeUSD(quote: QuoteResponse): string | null {
   }
   // UniswapX routes are gasless for the swapper
   return null
+}
+
+// ── Build a FillerSwap from a Uniswap quote ─────────────────────────────────
+
+export interface BuildFillerSwapRequest {
+  /** Input token address */
+  assetIn: Address
+  /** Output token address */
+  assetOut: Address
+  /** Amount in smallest unit. Use 0n if the contract already holds the tokens (e.g. from a preceding withdraw). */
+  amountIn: bigint
+  /** Chain ID (as string, e.g. "42220" for Celo) */
+  chainId: string
+  /** Slippage tolerance as percentage 0-100 (e.g. 0.5 for 0.5%) */
+  slippageTolerance?: number
+  /** Address that will call the DEX — should be the SettlementForwarder */
+  forwarderAddress: Address
+}
+
+/**
+ * Fetch a Uniswap quote and build a ready-to-use FillerSwap object.
+ *
+ * The returned FillerSwap can be passed directly to `encodeFillerCalldata()`.
+ * Only CLASSIC (AMM) routes are supported — UniswapX Dutch auctions are not
+ * compatible with the Verato forwarder execution model.
+ *
+ * @param request - Swap parameters
+ * @param config  - Uniswap Trading API config (apiKey, optional baseUrl)
+ * @returns FillerSwap ready for settlement encoding
+ */
+export async function buildFillerSwap(
+  request: BuildFillerSwapRequest,
+  config: UniswapConfig,
+): Promise<FillerSwap> {
+  const quote = await fetchSwapRoute(
+    {
+      swapper: request.forwarderAddress,
+      tokenIn: request.assetIn,
+      tokenOut: request.assetOut,
+      tokenInChainId: request.chainId,
+      tokenOutChainId: request.chainId,
+      amount: request.amountIn > 0n ? request.amountIn.toString() : '0',
+      type: 'EXACT_INPUT',
+      slippageTolerance: request.slippageTolerance ?? 0.5,
+      routingPreference: 'CLASSIC',
+    },
+    config,
+  )
+
+  if (quote.routing !== 'CLASSIC') {
+    throw new Error(
+      `Expected CLASSIC route but got ${quote.routing}. ` +
+      `Verato settlement requires AMM routing (use routingPreference: "CLASSIC").`,
+    )
+  }
+
+  const classic = quote as ClassicQuote
+  const mp = classic.quote.methodParameters
+
+  if (!mp?.calldata || !mp?.to) {
+    throw new Error(
+      'Uniswap quote did not return methodParameters. ' +
+      'Ensure the Trading API is configured to return calldata.',
+    )
+  }
+
+  return {
+    assetIn: request.assetIn,
+    assetOut: request.assetOut,
+    amountIn: request.amountIn,
+    target: mp.to as Address,
+    swapCalldata: mp.calldata as Hex,
+  }
+}
+
+/**
+ * Build a FillerSwap from a pre-fetched Uniswap CLASSIC quote.
+ *
+ * Use this when you already have a quote (e.g. for display/confirmation)
+ * and want to convert it to a FillerSwap without re-fetching.
+ */
+export function fillerSwapFromQuote(
+  quote: ClassicQuote,
+  assetIn: Address,
+  assetOut: Address,
+  amountIn: bigint,
+): FillerSwap {
+  const mp = quote.quote.methodParameters
+
+  if (!mp?.calldata || !mp?.to) {
+    throw new Error(
+      'Quote does not contain methodParameters. ' +
+      'Only CLASSIC quotes with calldata are supported.',
+    )
+  }
+
+  return {
+    assetIn,
+    assetOut,
+    amountIn,
+    target: mp.to as Address,
+    swapCalldata: mp.calldata as Hex,
+  }
 }
