@@ -5,6 +5,87 @@ import Configurator from './components/Configurator'
 
 const APP_CHAIN = celo
 
+// ── Logo ─────────────────────────────────────────────────────────────────
+
+function VeratoLogo({ className = 'h-8' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        {/* Outer hex — cyan to violet diagonal sweep */}
+        <linearGradient id="vg1" x1="4" y1="4" x2="44" y2="44" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#22d3ee" />
+          <stop offset="0.4" stopColor="#8b5cf6" />
+          <stop offset="1" stopColor="#ec4899" />
+        </linearGradient>
+        {/* Inner glow — teal to purple */}
+        <linearGradient id="vg2" x1="13" y1="12" x2="35" y2="36" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#67e8f9" />
+          <stop offset="0.5" stopColor="#a78bfa" />
+          <stop offset="1" stopColor="#f472b6" />
+        </linearGradient>
+        {/* V strokes — bright white-cyan to electric violet */}
+        <linearGradient id="vg3" x1="15" y1="16" x2="33" y2="36" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#e0f2fe" />
+          <stop offset="0.35" stopColor="#67e8f9" />
+          <stop offset="0.7" stopColor="#c084fc" />
+          <stop offset="1" stopColor="#f472b6" />
+        </linearGradient>
+        {/* Ambient glow filter */}
+        <filter id="vglow">
+          <feGaussianBlur stdDeviation="1.5" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+      {/* Outer hexagon — cyan→violet→pink gradient */}
+      <polygon
+        points="24,2 44,14 44,34 24,46 4,34 4,14"
+        fill="url(#vg1)"
+      />
+      {/* Mid hexagon ring — dark cutout */}
+      <polygon
+        points="24,7 39,16.5 39,31.5 24,41 9,31.5 9,16.5"
+        fill="#07080f"
+      />
+      {/* Inner hexagon — subtle gradient fill */}
+      <polygon
+        points="24,11 35,18 35,30 24,37 13,30 13,18"
+        fill="url(#vg2)"
+        opacity="0.08"
+      />
+      {/* Outer V — bold, glowing */}
+      <path
+        d="M15,18 L24,34 L33,18"
+        stroke="url(#vg3)"
+        strokeWidth="2.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+        filter="url(#vglow)"
+      />
+      {/* Inner V — ghosted depth layer */}
+      <path
+        d="M19,21 L24,30 L29,21"
+        stroke="url(#vg2)"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+        opacity="0.45"
+      />
+      {/* Crown diamond */}
+      <polygon
+        points="24,9 26,12 24,15 22,12"
+        fill="url(#vg3)"
+        opacity="0.8"
+        filter="url(#vglow)"
+      />
+    </svg>
+  )
+}
+
 // ── SVG Icons ───────────────────────────────────────────────────────────
 
 function WalletIcon({ className = 'w-4 h-4' }: { className?: string }) {
@@ -276,9 +357,12 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-950 text-white">
       <header className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Verato</h1>
-          <p className="text-sm text-gray-500">Agent Settlement Gateway on {APP_CHAIN.name}</p>
+        <div className="flex items-center gap-3">
+          <VeratoLogo className="h-9 w-9" />
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Verato</h1>
+            <p className="text-sm text-gray-500">Agent Settlement Gateway on {APP_CHAIN.name}</p>
+          </div>
         </div>
         <WalletButton />
       </header>

@@ -78,28 +78,40 @@
     },
     "42220": {
       "0x765de816845861e75a25fca122bb6898b8b1282a": {
-        "aToken": "0x918146359264c492bd6934071c6bd31c854edbc3",
-        "sToken": "0x3a3e42a5aa9f18e2c1f0f1178a3d6d5d3f1b4c2e",
-        "vToken": "0x4b2e9354eff2a7e2163e8e1f604d3a6e5c6e7f8a",
+        "aToken": "0xbba98352628b0b0c4b40583f593ffcb630935a45",
+        "sToken": "0x0000000000000000000000000000000000000000",
+        "vToken": "0x05ee3d1fbacbdba1259946033cd7a42fdfcccf0d",
         "symbol": "cUSD"
       },
       "0xd8763cba276a3738e6de85b4b3bf5fded6d6ca73": {
-        "aToken": "0x7c1b4d1a3e5f6b2c8d9e0f1a2b3c4d5e6f7a8b9c",
-        "sToken": "0x2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c",
-        "vToken": "0x5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+        "aToken": "0x34c02571094e08e935b8cf8dc10f1ad6795f1f81",
+        "sToken": "0x0000000000000000000000000000000000000000",
+        "vToken": "0x5c2b7eb5886b3cec5cce1019e34493da33291af5",
         "symbol": "cEUR"
       },
       "0x471ece3750da237f93b8e339c536989b8978a438": {
-        "aToken": "0x8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e",
-        "sToken": "0x0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a",
-        "vToken": "0x1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+        "aToken": "0xc3e77dc389537db1eec7c33b95cf3beeca71a209",
+        "sToken": "0x0000000000000000000000000000000000000000",
+        "vToken": "0xaea37b42955de2ba2e4af6581e46349bcd3ea2d6",
         "symbol": "CELO"
       },
-      "0x66803fb87abd4aac3cbb3fad7c3aa01f6f3fb207": {
-        "aToken": "0xa1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
-        "sToken": "0xb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1",
-        "vToken": "0xc3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+      "0xd221812de1bd094f35587ee8e174b07b6167d9af": {
+        "aToken": "0xf385280f36e009c157697d25e0b802efabfd789c",
+        "sToken": "0x0000000000000000000000000000000000000000",
+        "vToken": "0x6508cff7c5fba053af00a4e894500e6fa00274b7",
         "symbol": "WETH"
+      },
+      "0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e": {
+        "aToken": "0xdee98402a302e4d707fb9bf2bac66faeec31e8df",
+        "sToken": "0x0000000000000000000000000000000000000000",
+        "vToken": "0xe15324a9887999803b931ac45aa89a94a9750052",
+        "symbol": "USDT"
+      },
+      "0xceba9300f2b948710d2653dd7b07f33a8b32118c": {
+        "aToken": "0xff8309b9e99bfd2d4021bc71a362abd93dbd4785",
+        "sToken": "0x0000000000000000000000000000000000000000",
+        "vToken": "0xdbe517c0fa6467873b684eccbed77217e471e862",
+        "symbol": "USDC"
       }
     },
     "10": {
@@ -137,10 +149,10 @@
         "vToken": "0xf0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9",
         "symbol": "CELO"
       },
-      "0x2def4285787d58a2f811af24755a8150622f4361": {
-        "aToken": "0xa1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
-        "sToken": "0xb2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1",
-        "vToken": "0xc3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+      "0xe8537a3d056da446677b9e9d6c5db704eaab4787": {
+        "aToken": "0x9802d866fde4563d088a6619f7cef82c0b991a55",
+        "sToken": "0x0d00d9a02b85e9274f60a082609f44f7c57f373d",
+        "vToken": "0xbd408042909351b649dc50353532deef6de9faa9",
         "symbol": "cREAL"
       }
     }

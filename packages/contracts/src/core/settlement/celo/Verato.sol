@@ -52,7 +52,7 @@ contract Verato is
     // ═════════════════════════════════════════════════════════════════════════
 
     /// @dev Morpho Blue canonical CREATE2 address.
-    address internal constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
+    address internal constant MORPHO_BLUE = 0xd24ECdD8C1e0E57a4E26B1a7bbeAa3e95466A569;
 
     // ═════════════════════════════════════════════════════════════════════════
     //  Immutables

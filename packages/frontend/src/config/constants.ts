@@ -1,11 +1,11 @@
 import type { Address } from 'viem'
 import { zeroAddress } from 'viem'
 
-export const VERATO_ADDRESS = '0x1dfA413DBc7Df4dDb5480C91546C2DDC1646183c' as Address
-export const FORWARDER_ADDRESS = '0x5B0aE3955cFD1fF296affcF1A196750Df9a7420d' as Address
+export const VERATO_ADDRESS = '0x9C2295A43C5b938b079f9057b82E4da7C832753A' as Address
+export const FORWARDER_ADDRESS = '0x90d137E4845Ea9C5e4c9Bd8ABf8A1f9f04d0DE65' as Address
 
 export const VERATO_ADDRESSES: Record<string, Address> = {
-  '42220': VERATO_ADDRESS,
+  '42220': VERATO_ADDRESS,  // Celo mainnet
 }
 
 export const POOL_ADDRESSES: Record<string, Address> = {

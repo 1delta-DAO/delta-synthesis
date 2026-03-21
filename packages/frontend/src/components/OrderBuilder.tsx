@@ -1,21 +1,16 @@
 import { useState, useMemo, useCallback } from 'react'
-import { useAccount, useConnect, useDisconnect } from 'wagmi'
+import { useAccount } from 'wagmi'
 import { encodePacked, numberToHex, concatHex, zeroAddress, type Address, type Hex } from 'viem'
-import type { CollectedConfig, CollectedAaveConfig, CollectedMorphoMarket, AaveTokenEntry } from '../types'
+import type { CollectedConfig, CollectedAaveConfig, CollectedMorphoMarket } from '../types'
 import { getVeratoAddress, getPoolAddress } from '../config/constants'
 import { usePermitSignatures, type PermissionSignatureRequest } from '../hooks/usePermitSignatures'
 import { useOrderSubmission } from '../hooks/useOrderSubmission'
-import aaveTokensRaw from '../data/aave-tokens.json'
-
 import {
   LendingOp,
   buildUnsignedOrder,
   type Condition,
   type BuildOrderInput,
 } from '../settlement'
-
-type AaveTokensData = Record<string, Record<string, Record<string, AaveTokenEntry>>>
-const aaveTokens = aaveTokensRaw as AaveTokensData
 
 // ── Lender IDs for known forks ──────────────────────────────────────────
 // Matches DeltaEnums.sol: UP_TO_AAVE_V3=1000, UP_TO_AAVE_V2=2000, ..., UP_TO_MORPHO=5000
@@ -190,19 +185,15 @@ function derivePermissionRequests(
   for (const entry of config.entries) {
     if (entry.protocol === 'aave') {
       const aave = entry as CollectedAaveConfig
-      const forkData = aaveTokens[aave.fork]?.[config.chainId] ?? {}
 
       for (const token of aave.tokens) {
-        const tokenData = forkData[token.underlying]
-        if (!tokenData) continue
-
         if (token.collateralToken) {
           const key = `permit:${token.collateralToken}`
           if (!seen.has(key)) {
             seen.add(key)
             requests.push({
               kind: 'ERC2612_PERMIT',
-              label: `Permit ${tokenData.symbol} aToken`,
+              label: `Permit ${token.symbol} aToken`,
               targetAddress: token.collateralToken as Address,
               chainId,
             })
@@ -215,7 +206,7 @@ function derivePermissionRequests(
             seen.add(key)
             requests.push({
               kind: 'AAVE_DELEGATION',
-              label: `Delegate ${tokenData.symbol} vToken`,
+              label: `Delegate ${token.symbol} vToken`,
               targetAddress: token.debtToken as Address,
               chainId,
             })
@@ -253,9 +244,7 @@ const OP_COLORS: Record<number, string> = {
 }
 
 export default function OrderBuilder({ config }: { config: CollectedConfig }) {
-  const { address, isConnected } = useAccount()
-  const { connect, connectors } = useConnect()
-  const { disconnect } = useDisconnect()
+  const { isConnected } = useAccount()
 
   const [minReputation, setMinReputation] = useState(0)
   const [minHealthFactor, setMinHealthFactor] = useState(1.1)
@@ -371,38 +360,13 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
 
   return (
     <div className="space-y-6">
-      {/* Wallet connection */}
-      <div className="flex items-center justify-between bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
-        {isConnected ? (
-          <>
-            <div className="text-sm">
-              <span className="text-gray-400">Connected: </span>
-              <span className="font-mono text-emerald-400">{address?.slice(0, 6)}...{address?.slice(-4)}</span>
-            </div>
-            <button
-              onClick={() => disconnect()}
-              className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-            >
-              Disconnect
-            </button>
-          </>
-        ) : (
-          <div className="flex items-center gap-3 w-full">
-            <span className="text-sm text-gray-400">Connect wallet to sign</span>
-            <div className="flex gap-2 ml-auto">
-              {connectors.map((connector) => (
-                <button
-                  key={connector.uid}
-                  onClick={() => connect({ connector })}
-                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs rounded transition-colors"
-                >
-                  {connector.name}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+      {/* Wallet status */}
+      {!isConnected && (
+        <div className="flex items-center gap-2 bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
+          <div className="w-2 h-2 rounded-full bg-gray-600" />
+          <span className="text-sm text-gray-400">Connect your wallet using the button in the top right corner</span>
+        </div>
+      )}
 
       {/* Merkle leaves */}
       <div>
