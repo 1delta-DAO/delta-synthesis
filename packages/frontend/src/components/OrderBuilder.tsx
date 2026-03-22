@@ -135,14 +135,16 @@ function selectionToLeaves(config: CollectedConfig, chainId: string): LeafInput[
         }
 
         if (token.debtToken) {
-          const brData = encodePacked(['uint8', 'address', 'address'], [2, pool, token.debtToken as Address])
+          // Borrow data: [1: mode][20: pool]
+          const brData = encodePacked(['uint8', 'address'], [2, pool])
           const brKey = `${LendingOp.BORROW}:${lenderId}:${brData}`
           if (!seen.has(brKey)) {
             seen.add(brKey)
             leaves.push({ op: LendingOp.BORROW, lenderId, data: brData, label: `Borrow ${token.symbol} (${aave.fork})` })
           }
 
-          const rpData = encodePacked(['uint8', 'address', 'address'], [2, pool, token.debtToken as Address])
+          // Repay data: [1: mode][20: debtToken][20: pool]
+          const rpData = encodePacked(['uint8', 'address', 'address'], [2, token.debtToken as Address, pool])
           const rpKey = `${LendingOp.REPAY}:${lenderId}:${rpData}`
           if (!seen.has(rpKey)) {
             seen.add(rpKey)
@@ -300,7 +302,8 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
   const maxFeeBps = Math.round(maxFeePct * 1e5) // 0.5% → 50000 (1e7 denominator: 100% = 1e7)
   const [swapTolerancePct, setSwapTolerancePct] = useState(0.5) // 0.5% swap tolerance
   const swapTolerance = BigInt(Math.round(swapTolerancePct * 1e5)) // 1e7 denominator
-  const [deadlineMinutes, setDeadlineMinutes] = useState(60)
+  const [deadlineDays, setDeadlineDays] = useState(7)
+  const deadlineMinutes = deadlineDays * 24 * 60
 
   const chainId = Number(config.chainId)
   const veratoAddress = getVeratoAddress(config.chainId)
@@ -419,97 +422,70 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Wallet status */}
       {!isConnected && (
-        <div className="flex items-center gap-2 bg-gray-900 border border-gray-800 rounded-lg px-4 py-3">
+        <div className="flex items-center gap-2 bg-gray-900 border border-gray-800 rounded-lg px-4 py-3 animate-fade-in">
           <div className="w-2 h-2 rounded-full bg-gray-600" />
           <span className="text-sm text-gray-400">Connect your wallet using the button in the top right corner</span>
         </div>
       )}
 
-      {/* Merkle leaves */}
+      {/* Merkle leaves — compact chips */}
       <div>
-        <h3 className="text-sm font-medium text-gray-400 mb-2">
-          Approved Actions ({leafInputs.length} leaves)
+        <h3 className="text-xs font-medium text-gray-500 mb-1.5">
+          Permitted Operations <span className="text-gray-600">({leafInputs.length})</span>
         </h3>
-        <div className="space-y-1 max-h-48 overflow-y-auto">
+        <div className="flex flex-wrap gap-1.5">
           {leafInputs.map((l, i) => (
-            <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-gray-800/60 rounded text-xs">
-              <span className={`px-1.5 py-0.5 rounded font-medium ${OP_COLORS[l.op] ?? 'bg-gray-600/20 text-gray-400'}`}>
-                {OP_NAMES[l.op]}
-              </span>
-              <span className="text-gray-300">{l.label}</span>
-              <span className="text-gray-600 ml-auto font-mono">L{l.lenderId}</span>
-            </div>
+            <span
+              key={i}
+              style={{ animationDelay: `${i * 30}ms` }}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium animate-fade-in transition-all duration-200 hover:scale-105 ${OP_COLORS[l.op] ?? 'bg-gray-600/20 text-gray-400'}`}
+              title={l.label}
+            >
+              {OP_NAMES[l.op]}
+              <span className="text-[9px] opacity-60">{l.label?.replace(/^(Deposit|Withdraw|Borrow|Repay)\s+/, '').replace(/\s*\(.*\)$/, '')}</span>
+            </span>
           ))}
         </div>
       </div>
 
       {/* Parameters */}
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">Min Solver Reputation</label>
-          <input
-            type="number"
-            value={minReputation}
-            onChange={(e) => setMinReputation(Number(e.target.value))}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white"
-            min={0}
-          />
-          <span className="text-xs text-gray-600">0 = permissionless</span>
-        </div>
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">Min Health Factor</label>
-          <input
-            type="number"
-            step="0.1"
-            value={minHealthFactor}
-            onChange={(e) => setMinHealthFactor(Number(e.target.value))}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white"
-            min={0}
-          />
-          <span className="text-xs text-gray-600">0 = no HF check</span>
-        </div>
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">Max Fee (%)</label>
-          <input
-            type="number"
-            value={maxFeePct}
-            onChange={(e) => setMaxFeePct(Number(e.target.value))}
-            step={0.01}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white"
-            min={0}
-          />
-        </div>
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">Swap Tolerance (%)</label>
-          <input
-            type="number"
-            value={swapTolerancePct}
-            onChange={(e) => setSwapTolerancePct(Number(e.target.value))}
-            step={0.01}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white"
-            min={0}
-          />
-          <span className="text-xs text-gray-600">Oracle-verified slippage</span>
-        </div>
-        <div>
-          <label className="block text-xs text-gray-500 mb-1">Deadline (minutes)</label>
-          <input
-            type="number"
-            value={deadlineMinutes}
-            onChange={(e) => setDeadlineMinutes(Number(e.target.value))}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white"
-            min={1}
-          />
-          <span className="text-xs text-gray-600">From now</span>
-        </div>
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { label: 'Reputation', value: minReputation, set: setMinReputation, min: 0, step: 1, hint: '0 = any', icon: '\u2605' },
+          { label: 'Health Factor', value: minHealthFactor, set: setMinHealthFactor, min: 0, step: 0.1, hint: '0 = skip', icon: '\u2764' },
+          { label: 'Max Fee', value: maxFeePct, set: setMaxFeePct, min: 0, step: 0.01, suffix: '%', icon: '\u2696' },
+          { label: 'Swap Tolerance', value: swapTolerancePct, set: setSwapTolerancePct, min: 0, step: 0.01, suffix: '%', icon: '\u21C4' },
+          { label: 'Deadline', value: deadlineDays, set: setDeadlineDays, min: 1, step: 1, suffix: 'days', icon: '\u23F1' },
+        ].map(({ label, value, set, min, step, suffix, hint, icon }) => (
+          <div key={label} className="group">
+            <label className="flex items-center gap-1 text-[10px] font-medium text-gray-500 mb-0.5 group-focus-within:text-amber-400 transition-colors">
+              <span className="text-xs opacity-50">{icon}</span>
+              {label}
+            </label>
+            <div className="relative">
+              <input
+                type="number"
+                value={value}
+                onChange={(e) => set(Number(e.target.value))}
+                step={step}
+                min={min}
+                className="w-full bg-gray-900/80 border border-gray-700/60 rounded-md px-2 py-1.5 text-xs text-white font-mono tabular-nums focus:outline-none focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 transition-all duration-200 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+              />
+              {suffix && (
+                <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 pointer-events-none">{suffix}</span>
+              )}
+            </div>
+            {hint && <span className="text-[9px] text-gray-600 mt-0.5 block">{hint}</span>}
+          </div>
+        ))}
       </div>
 
       {/* Preview */}
       {preview && (
-        <div>
+        <div className="animate-slide-down">
           <h3 className="text-sm font-medium text-gray-400 mb-2">Order Preview</h3>
           <div className="bg-gray-900 border border-gray-800 rounded-lg p-3 space-y-1 text-xs font-mono">
             <div><span className="text-gray-500">merkleRoot:</span> <span className="text-emerald-400">{preview.merkleRoot}</span></div>
@@ -524,7 +500,7 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
 
       {/* Permission Signatures */}
       {permissionRequests.length > 0 && (
-        <div>
+        <div className="animate-slide-down">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-sm font-medium text-amber-400">
               Required Signatures ({signedPermissions.length}/{permissionRequests.length})
@@ -538,47 +514,59 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
               </button>
             )}
           </div>
-          <div className="space-y-2">
-            {permissionRequests.map((req) => {
+          <div className="space-y-1.5">
+            {permissionRequests.map((req, idx) => {
               const signed = signedPermissions.find(p => p.request.label === req.label)
               const isCurrentlySigning = signingPermission === req.label
 
               return (
                 <div
                   key={req.label}
-                  className={`flex items-center justify-between px-3 py-2.5 rounded-lg border transition-colors ${
+                  style={{ animationDelay: `${idx * 50}ms` }}
+                  className={`flex items-center justify-between rounded-lg border transition-all duration-300 ease-in-out animate-slide-up ${
                     signed
-                      ? 'bg-emerald-600/10 border-emerald-500/30'
-                      : 'bg-gray-800/60 border-gray-700/50'
+                      ? 'px-2.5 py-1.5 bg-emerald-600/5 border-emerald-500/20'
+                      : 'px-3 py-2.5 bg-gray-800/60 border-gray-700/50'
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${signed ? 'bg-emerald-400' : 'bg-gray-600'}`} />
-                    <div>
-                      <span className="text-sm text-white">{req.label}</span>
-                      <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${
-                        req.kind === 'ERC2612_PERMIT' ? 'bg-indigo-600/20 text-indigo-400' :
-                        req.kind === 'AAVE_DELEGATION' ? 'bg-red-600/20 text-red-400' :
-                        req.kind === 'AAVE_DELEGATION_TX' ? 'bg-orange-600/20 text-orange-400' :
-                        'bg-violet-600/20 text-violet-400'
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={`shrink-0 flex items-center justify-center transition-all duration-300 ${
+                      signed ? 'w-4 h-4' : 'w-5 h-5'
+                    }`}>
+                      {signed ? (
+                        <svg className="w-4 h-4 text-emerald-400" viewBox="0 0 16 16" fill="none">
+                          <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5" opacity="0.3" />
+                          <path d="M4.5 8.5L7 11L11.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      ) : (
+                        <span className="w-5 h-5 rounded-full border border-gray-600 bg-gray-800/50" />
+                      )}
+                    </span>
+                    <span className={`truncate transition-all duration-300 ${signed ? 'text-xs text-gray-400' : 'text-sm text-white'}`}>
+                      {req.label}
+                    </span>
+                    {!signed && (
+                      <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full ${
+                        req.kind === 'ERC2612_PERMIT' ? 'bg-indigo-600/15 text-indigo-400' :
+                        req.kind === 'AAVE_DELEGATION' ? 'bg-red-600/15 text-red-400' :
+                        req.kind === 'AAVE_DELEGATION_TX' ? 'bg-orange-600/15 text-orange-400' :
+                        'bg-violet-600/15 text-violet-400'
                       }`}>
                         {req.kind === 'ERC2612_PERMIT' ? 'Permit' :
                          req.kind === 'AAVE_DELEGATION' ? 'Delegation' :
-                         req.kind === 'AAVE_DELEGATION_TX' ? 'Approve (tx)' :
-                         'Authorization'}
+                         req.kind === 'AAVE_DELEGATION_TX' ? 'Tx' :
+                         'Auth'}
                       </span>
-                    </div>
+                    )}
                   </div>
-                  {signed ? (
-                    <span className="text-xs text-emerald-400">{req.kind === 'AAVE_DELEGATION_TX' ? 'Approved' : 'Signed'}</span>
-                  ) : (
+                  {!signed && (
                     <button
                       onClick={() => signPermission(req)}
                       disabled={!isConnected || isCurrentlySigning}
-                      className={`px-3 py-1 text-xs rounded transition-colors ${
+                      className={`shrink-0 px-3 py-1.5 text-xs font-medium rounded-md transition-all duration-200 ${
                         isCurrentlySigning
                           ? 'bg-gray-700 text-gray-400 cursor-wait'
-                          : 'bg-amber-600 hover:bg-amber-500 text-white'
+                          : 'bg-amber-600 hover:bg-amber-500 active:scale-95 text-white shadow-sm shadow-amber-600/20'
                       }`}
                     >
                       {isCurrentlySigning
@@ -591,7 +579,7 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
             })}
           </div>
           {permitError && (
-            <div className="mt-2 bg-red-900/30 border border-red-700/50 rounded-lg p-2 text-xs text-red-300">
+            <div className="mt-2 bg-red-900/30 border border-red-700/50 rounded-lg p-2 text-xs text-red-300 animate-slide-up">
               {permitError}
             </div>
           )}
@@ -607,10 +595,10 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
             }
           }}
           disabled={!!signingPermission}
-          className={`w-full py-2 rounded-lg font-medium text-sm transition-colors ${
+          className={`w-full py-2.5 rounded-lg font-medium text-sm animate-slide-up transition-all duration-200 active:scale-[0.98] ${
             signingPermission
               ? 'bg-gray-700 text-gray-400 cursor-wait'
-              : 'bg-amber-600 hover:bg-amber-500 text-white'
+              : 'bg-amber-600 hover:bg-amber-500 text-white shadow-sm shadow-amber-600/20'
           }`}
         >
           {signingPermission ? `Signing: ${signingPermission}` : `Sign All Remaining (${pendingPermits.length})`}
@@ -621,14 +609,14 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
       <button
         onClick={handleSubmit}
         disabled={submitting || !preview || !isConnected || !allPermitsSigned}
-        className={`w-full py-3 rounded-lg font-medium text-sm transition-colors ${
+        className={`w-full py-3 rounded-xl font-medium text-sm transition-all duration-200 active:scale-[0.98] ${
           submitting
-            ? 'bg-gray-700 text-gray-400 cursor-wait'
+            ? 'bg-gray-700 text-gray-400 cursor-wait animate-pulse'
             : !isConnected
             ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
             : !allPermitsSigned
             ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-            : 'bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer'
+            : 'bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow-md shadow-emerald-600/20 hover:shadow-emerald-500/30'
         }`}
       >
         {submitting
@@ -641,14 +629,14 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
       </button>
 
       {submitError && (
-        <div className="bg-red-900/30 border border-red-700/50 rounded-lg p-3 text-sm text-red-300">
+        <div className="bg-red-900/30 border border-red-700/50 rounded-lg p-3 text-sm text-red-300 animate-slide-up">
           {submitError}
         </div>
       )}
 
       {/* Success */}
       {submitted && (
-        <div className="bg-emerald-900/30 border border-emerald-700/50 rounded-lg p-4 space-y-2">
+        <div className="bg-emerald-900/30 border border-emerald-700/50 rounded-lg p-4 space-y-2 animate-slide-up">
           <h3 className="text-sm font-medium text-emerald-400">Order Submitted</h3>
           <div className="text-xs font-mono text-gray-300">
             <div>ID: {submitted.id}</div>

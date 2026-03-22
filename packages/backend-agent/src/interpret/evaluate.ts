@@ -48,13 +48,23 @@ export interface CollateralMigration {
 export interface DebtMigration {
   type: 'debt_migration'
   sourceLender: string
-  collateralToken: Address
-  debtToken: Address
-  debtAmountUsd: number
-  sourceNetYield: number | null
   destLender: string
-  destNetYield: number | null
-  improvement: number | null
+  collateralToken: Address
+  collateralSymbol: string
+  debtToken: Address
+  debtSymbol: string
+  collateralAmountUsd: number
+  debtAmountUsd: number
+  /** Net yield = (depositAPR * deposits - borrowAPR * borrows) / NAV */
+  sourceNetYield: number
+  destNetYield: number
+  /** Positive = destination is better */
+  improvement: number
+  /** Leaf indices for the 4 actions */
+  withdrawLeafIndex: number | undefined
+  depositLeafIndex: number | undefined
+  repayLeafIndex: number | undefined
+  borrowLeafIndex: number | undefined
   needsFlashLoan: true
 }
 
@@ -136,9 +146,17 @@ function lenderIdToKey(id: number): string {
   return `UNKNOWN_${id}`
 }
 
+interface PermittedOp {
+  leafIndex: number
+  lenderKey: string
+  lenderId: number
+}
+
 function extractPermittedOps(leaves: LeafDescription[]) {
   const withdraws: PermittedWithdraw[] = []
   const deposits: PermittedDeposit[] = []
+  const borrows: PermittedOp[] = []
+  const repays: PermittedOp[] = []
 
   for (const leaf of leaves) {
     const key = lenderIdToKey(leaf.lenderId)
@@ -148,9 +166,15 @@ function extractPermittedOps(leaves: LeafDescription[]) {
     if (leaf.op === 'DEPOSIT') {
       deposits.push({ leafIndex: leaf.index, lenderKey: key, lenderId: leaf.lenderId })
     }
+    if (leaf.op === 'BORROW') {
+      borrows.push({ leafIndex: leaf.index, lenderKey: key, lenderId: leaf.lenderId })
+    }
+    if (leaf.op === 'REPAY') {
+      repays.push({ leafIndex: leaf.index, lenderKey: key, lenderId: leaf.lenderId })
+    }
   }
 
-  return { withdraws, deposits }
+  return { withdraws, deposits, borrows, repays }
 }
 
 // ── Collateral-only evaluation (no debt) ────────────────────────────────
@@ -314,11 +338,125 @@ export function evaluateMigrations(
     }
   }
 
-  // Debt path: handled by the existing context.ts flow
-  // Return empty here — caller should fall through to runSettlementFlow
+  // Debt path: evaluate full position migrations (flash loan required)
+  const debtCandidates = evaluateDebtMigrations(userSummary, pools, leaves)
   return {
     hasDebt: true,
-    candidates: [],
-    bestCandidate: null,
+    candidates: debtCandidates,
+    bestCandidate: debtCandidates[0] ?? null,
   }
+}
+
+// ── Debt position migration evaluation ──────────────────────────────────
+
+/**
+ * Compute net yield: (depositAPR * depositsUsd - borrowAPR * borrowsUsd) / NAV
+ * Returns annualized % (e.g. 2.5 = 2.5% net yield)
+ */
+function computeNetYield(
+  depositRate: number, depositsUsd: number,
+  borrowRate: number, borrowsUsd: number,
+): number {
+  const nav = depositsUsd - borrowsUsd
+  if (nav <= 0) return -Infinity
+  return (depositRate * depositsUsd - borrowRate * borrowsUsd) / nav
+}
+
+function evaluateDebtMigrations(
+  userSummary: UserSummary,
+  pools: PoolInfo[],
+  leaves: LeafDescription[],
+): DebtMigration[] {
+  const { withdraws, deposits, borrows, repays } = extractPermittedOps(leaves)
+  const candidates: DebtMigration[] = []
+
+  for (const lender of userSummary.lenders) {
+    if (!lender.hasDebt) continue
+    if (lender.deposits.length === 0 || lender.debts.length === 0) continue
+
+    // Check user has permitted WITHDRAW + REPAY from this lender
+    const permittedWithdraw = withdraws.find(w => {
+      const lenderUpper = lender.protocol.toUpperCase()
+      if (lenderUpper === 'MOOLA') return w.lenderKey === 'AAVE_V2'
+      return w.lenderKey === lenderUpper || lenderUpper.startsWith(w.lenderKey)
+    })
+    const permittedRepay = repays.find(r => {
+      const lenderUpper = lender.protocol.toUpperCase()
+      if (lenderUpper === 'MOOLA') return r.lenderKey === 'AAVE_V2'
+      return r.lenderKey === lenderUpper || lenderUpper.startsWith(r.lenderKey)
+    })
+    if (!permittedWithdraw || !permittedRepay) continue
+
+    // Get source rates for the collateral and debt tokens
+    const collateral = lender.deposits[0] // primary collateral
+    const debt = lender.debts[0] // primary debt
+
+    const sourceCollateralPool = pools.find(
+      p => p.lenderKey === lender.protocol &&
+           p.token.toLowerCase() === collateral.token.toLowerCase(),
+    )
+    const sourceDebtPool = pools.find(
+      p => p.lenderKey === lender.protocol &&
+           p.token.toLowerCase() === debt.token.toLowerCase(),
+    )
+
+    const sourceDepositRate = sourceCollateralPool?.depositRate ?? 0
+    const sourceBorrowRate = sourceDebtPool?.variableBorrowRate ?? 0
+    const sourceNetYield = computeNetYield(
+      sourceDepositRate, lender.totalDepositsUsd,
+      sourceBorrowRate, lender.totalDebtUsd,
+    )
+
+    // Find destination lenders with permitted DEPOSIT + BORROW
+    for (const permittedDeposit of deposits) {
+      if (permittedDeposit.lenderKey === permittedWithdraw.lenderKey) continue
+
+      const permittedBorrow = borrows.find(b => b.lenderKey === permittedDeposit.lenderKey)
+      if (!permittedBorrow) continue
+
+      // Check destination has pools for both collateral and debt tokens
+      const destCollateralPool = pools.find(
+        p => leafMatchesLender({ lenderId: permittedDeposit.lenderId } as LeafDescription, p.lenderKey) &&
+             p.token.toLowerCase() === collateral.token.toLowerCase() &&
+             p.collateralActive,
+      )
+      const destDebtPool = pools.find(
+        p => leafMatchesLender({ lenderId: permittedBorrow.lenderId } as LeafDescription, p.lenderKey) &&
+             p.token.toLowerCase() === debt.token.toLowerCase() &&
+             p.borrowingEnabled,
+      )
+      if (!destCollateralPool || !destDebtPool) continue
+      // Need enough borrow liquidity
+      if (destDebtPool.totalLiquidityUsd < lender.totalDebtUsd * 0.5) continue
+
+      const destNetYield = computeNetYield(
+        destCollateralPool.depositRate, lender.totalDepositsUsd,
+        destDebtPool.variableBorrowRate, lender.totalDebtUsd,
+      )
+
+      const improvement = destNetYield - sourceNetYield
+
+      candidates.push({
+        type: 'debt_migration',
+        sourceLender: lender.protocol,
+        destLender: destCollateralPool.lenderKey,
+        collateralToken: collateral.token,
+        collateralSymbol: collateral.symbol,
+        debtToken: debt.token,
+        debtSymbol: debt.symbol,
+        collateralAmountUsd: lender.totalDepositsUsd,
+        debtAmountUsd: lender.totalDebtUsd,
+        sourceNetYield,
+        destNetYield,
+        improvement,
+        withdrawLeafIndex: permittedWithdraw.leafIndex,
+        depositLeafIndex: permittedDeposit.leafIndex,
+        repayLeafIndex: permittedRepay.leafIndex,
+        borrowLeafIndex: permittedBorrow.leafIndex,
+        needsFlashLoan: true,
+      })
+    }
+  }
+
+  return candidates.sort((a, b) => b.improvement - a.improvement)
 }

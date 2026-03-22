@@ -24,7 +24,7 @@ import {
   type FillerSwap,
 } from '@delta-synthesis/settlement-sdk'
 import type { MerkleLeaf, StoredOrder } from '../order.js'
-import type { CollateralMigration, CollateralSwapMigration } from './evaluate.js'
+import type { CollateralMigration, CollateralSwapMigration, DebtMigration } from './evaluate.js'
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -166,11 +166,86 @@ export function buildCollateralSwapMigration(
 
   // The contract reads numSwaps from the first byte of fillerCalldata
   // and matches each filler swap to a signed conversion by asset pair.
-  // Only include the swap we're actually executing.
-  const fillerCalldata = encodeFillerCalldata([swap])
+  // Use amountIn=0 so the contract swaps its full balance (avoids dust from rounding).
+  // The quote amount was only needed for the Uniswap API to compute the route.
+  const fillerCalldata = encodeFillerCalldata([{ ...swap, amountIn: 0n }])
 
   return {
     executionData,
     fillerCalldata,
+  }
+}
+
+// ── Debt position migration (flash loan) ────────────────────────────────
+
+/**
+ * Build executionData for a full debt position migration via flash loan.
+ *
+ * Flow:
+ *   1. Flash loan debtToken from Morpho
+ *   2. Pre-actions:  REPAY debt on source, WITHDRAW collateral from source
+ *   3. Post-actions: DEPOSIT collateral to dest, BORROW debt from dest
+ *   4. Flash loan repaid from borrowed amount
+ *
+ * executionData = [2 pre-actions (REPAY, WITHDRAW), 2 post-actions (DEPOSIT, BORROW)]
+ * fillerCalldata = 0x (no swap — same tokens, different lender)
+ */
+export function buildDebtMigration(
+  order: StoredOrder,
+  migration: DebtMigration,
+  veratoAddress: Address,
+  flashLoanAmount: bigint,
+  feeRecipient?: Address,
+): BuiltSettlement {
+  const repayLeaf = order.order.leaves[migration.repayLeafIndex!]
+  const withdrawLeaf = order.order.leaves[migration.withdrawLeafIndex!]
+  const depositLeaf = order.order.leaves[migration.depositLeafIndex!]
+  const borrowLeaf = order.order.leaves[migration.borrowLeafIndex!]
+
+  if (!repayLeaf || !withdrawLeaf || !depositLeaf || !borrowLeaf) {
+    throw new Error(`Missing leaves for debt migration: repay=${migration.repayLeafIndex} withdraw=${migration.withdrawLeafIndex} deposit=${migration.depositLeafIndex} borrow=${migration.borrowLeafIndex}`)
+  }
+
+  // Pre-actions: repay debt (using flash-loaned tokens), then withdraw collateral
+  const preActions: MerkleAction[] = [
+    buildAction(
+      repayLeaf,
+      migration.debtToken,
+      AMOUNT_BALANCE,       // repay using flash-loaned balance
+      order.signer,         // repay on behalf of user
+    ),
+    buildAction(
+      withdrawLeaf,
+      migration.collateralToken,
+      AMOUNT_MAX,           // withdraw all collateral
+      veratoAddress,        // collateral goes to Verato
+    ),
+  ]
+
+  // Post-actions: deposit collateral to new lender, borrow debt to repay flash loan
+  const postActions: MerkleAction[] = [
+    buildAction(
+      depositLeaf,
+      migration.collateralToken,
+      AMOUNT_BALANCE,       // deposit all collateral Verato holds
+      order.signer,         // deposit on behalf of user
+    ),
+    buildAction(
+      borrowLeaf,
+      migration.debtToken,
+      flashLoanAmount,      // borrow exact amount to cover flash loan repayment
+      veratoAddress,        // borrowed tokens go to Verato for flash loan repayment
+    ),
+  ]
+
+  const executionData = encodeExecutionData(
+    preActions,
+    postActions,
+    feeRecipient ?? zeroAddress,
+  )
+
+  return {
+    executionData,
+    fillerCalldata: '0x' as Hex,  // no swap — same tokens
   }
 }

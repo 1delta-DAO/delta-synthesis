@@ -20,6 +20,7 @@ import {
   encodeMorphoAuthorization,
   encodeApproveToken,
   encodeSettle,
+  encodeSettleWithFlashLoan,
   veratoAbi,
   LenderRange,
   buildFillerSwap,
@@ -28,7 +29,7 @@ import type { StoredPermit } from './order.js'
 import { describeLeaves } from './order.js'
 import { fetchUserPositions } from './direct/api.js'
 import type { LenderPositions } from './direct/api.js'
-import { interpretPositions, fetchPools, evaluateMigrations, buildCollateralMigration, buildCollateralSwapMigration } from './interpret/index.js'
+import { interpretPositions, fetchPools, evaluateMigrations, buildCollateralMigration, buildCollateralSwapMigration, buildDebtMigration } from './interpret/index.js'
 import { initWallet, runAllSettlements } from './direct/index.js'
 import { setProviderKeys } from './providers/index.js'
 
@@ -86,28 +87,19 @@ interface OpenOrder {
 // ── LLM reasoning ──────────────────────────────────────────────────────
 
 function buildPrompt(order: OpenOrder): string {
-  return `You are an autonomous DeFi settlement agent operating on the Verato protocol on Celo.
+  return `You are an autonomous DeFi settlement agent on Verato (Celo). You earn fees from the maxFeeBps allowance on borrow surplus. Gas on Celo is extremely cheap (~$0.001 per tx), so even very small fees are profitable.
 
-You are evaluating whether to fill the following signed order:
+Order:
+- Deadline: ${new Date(order.order.deadline * 1000).toISOString()}
+- Max Fee: ${(order.order.maxFeeBps / 1e7 * 100).toFixed(4)}% (${order.order.maxFeeBps} in 1e7 units)
+- Solver: ${order.order.solver === '0x0000000000000000000000000000000000000000' ? 'permissionless' : order.order.solver}
+- Operations: ${order.order.leaves.length} permitted lending ops
 
-Signer: ${order.signer}
-Deadline: ${new Date(order.order.deadline * 1000).toISOString()}
-Max Fee: ${order.order.maxFeeBps} (1e7 denominator, i.e. ${(order.order.maxFeeBps / 1e7 * 100).toFixed(4)}%)
-Solver Restriction: ${order.order.solver}
-Min Solver Reputation: ${order.order.minSolverReputation}
-Chain: Celo (${order.order.chainId})
+Respond with JSON only: { "shouldFill": true/false, "reason": "brief" }
 
-Permitted operations (Merkle leaves):
-${order.order.leaves.map((l) => `  - op: ${l.op}, lenderId: ${l.lenderId}, data: ${l.data}`).join('\n')}
-
-Respond with a JSON object:
-{
-  "shouldFill": true/false,
-  "reason": "brief explanation",
-  "fillerCalldata": "0x"  // hex calldata for swaps if needed, or "0x" for none
-}
-
-Consider: Is the deadline still valid? Is the fee attractive? Are the operations safe to execute?`
+Decision rules:
+- ACCEPT if deadline is in the future. Any fee > 0 is profitable on Celo.
+- REJECT only if deadline has passed.`
 }
 
 async function callAnthropic(apiKey: string, prompt: string): Promise<string> {
@@ -404,7 +396,9 @@ async function executeSettlement(env: Env, order: OpenOrder, _llmFillerCalldata:
               functionName: 'balanceOf',
               args: [order.signer as Address],
             })
-            console.log(`  Withdraw amount: ${withdrawAmount} (aToken: ${aToken})`)
+            // Quote with 99.9% of balance to leave dust for rounding differences
+            const quoteAmount = withdrawAmount * 999n / 1000n
+            console.log(`  Withdraw amount: ${withdrawAmount} quote: ${quoteAmount} (aToken: ${aToken})`)
 
             // Find the conversion index in settlementData that matches this swap
             const sd = order.order.settlementData
@@ -424,7 +418,7 @@ async function executeSettlement(env: Env, order: OpenOrder, _llmFillerCalldata:
             const swap = await buildFillerSwap({
               assetIn: best.sourceToken,
               assetOut: best.destToken,
-              amountIn: withdrawAmount,
+              amountIn: quoteAmount,
               conversionIndex,
               chainId: env.CHAIN_ID,
               slippageTolerance: 0.5,
@@ -510,6 +504,106 @@ async function executeSettlement(env: Env, order: OpenOrder, _llmFillerCalldata:
         })
         return txHash
       }
+    }
+  }
+
+  // ── Debt migration (flash loan) ──────────────────────────────
+  if (userSummary.hasAnyDebt && userSummary.lenders.length > 0) {
+    const pools = await fetchPools(chainId)
+    console.log(`  Pools: ${pools.length}`)
+    const evaluation = evaluateMigrations(userSummary, pools, leafDescriptions)
+    console.log(`  Debt candidates: ${evaluation.candidates.length} best: ${evaluation.bestCandidate?.type ?? 'none'}`)
+
+    const best = evaluation.bestCandidate
+    if (best && best.type === 'debt_migration' && best.improvement > 0) {
+      console.log(`  Building debt migration: ${best.collateralSymbol}/${best.debtSymbol} ${best.sourceLender} → ${best.destLender} (net yield +${best.improvement.toFixed(2)}%)`)
+
+      const storedOrder = {
+        id: order.id, createdAt: 0, status: 'open' as const,
+        signer: order.signer as Address, signature: order.signature,
+        order: order.order, permits: order.permits ?? [],
+      }
+
+      // Read user's debt to determine flash loan amount
+      const publicClient = createPublicClient({ chain: celo, transport: http(env.RPC_URL) })
+      const repayLeaf = order.order.leaves[best.repayLeafIndex!]
+      // repay leaf data: [1: mode][20: debtToken][20: pool]
+      const vTokenAddr = `0x${repayLeaf.data.slice(4, 44)}` as Address
+      const debtBalance = await publicClient.readContract({
+        address: vTokenAddr,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [order.signer as Address],
+      })
+      // Flash loan slightly more than debt to cover accrued interest
+      const flashLoanAmount = debtBalance * 1010n / 1000n
+
+      const built = buildDebtMigration(storedOrder, best, verato, flashLoanAmount, account.address)
+      executionData = built.executionData
+      fillerCalldata = built.fillerCalldata
+      console.log(`  Flash loan: ${flashLoanAmount} ${best.debtSymbol} (debt: ${debtBalance})`)
+
+      // Morpho pool on Celo for flash loans
+      const morphoPool = '0xd24ECdD8C1e0E57a4E26B1a7bbeAa3e95466A569' as Address
+
+      // Build calls: permits + approvals + settleWithFlashLoan
+      const calls: Hex[] = []
+
+      for (const p of order.permits ?? []) {
+        const sig = p.signature
+        if (p.kind === 'ERC2612_PERMIT') {
+          calls.push(encodePermit({
+            token: p.targetAddress, owner: order.signer as Address, spender: verato,
+            value: maxUint256, deadline: BigInt(p.deadline), v: sig.v, r: sig.r, s: sig.s,
+          }))
+        } else if (p.kind === 'AAVE_DELEGATION') {
+          calls.push(encodeAaveDelegation({
+            debtToken: p.targetAddress, delegator: order.signer as Address, delegatee: verato,
+            value: maxUint256, deadline: BigInt(p.deadline), v: sig.v, r: sig.r, s: sig.s,
+          }))
+        } else if (p.kind === 'MORPHO_AUTHORIZATION') {
+          calls.push(encodeMorphoAuthorization({
+            morpho: p.targetAddress, authorizer: order.signer as Address, authorized: verato,
+            isAuthorized: true, nonce: BigInt(p.nonce), deadline: BigInt(p.deadline),
+            v: sig.v, r: sig.r, s: sig.s,
+          }))
+        }
+      }
+
+      // Approve collateral to dest pool (for deposit)
+      const depositLeaf = order.order.leaves[best.depositLeafIndex!]
+      const destPool = `0x${depositLeaf.data.slice(2, 42)}` as Address
+      calls.push(encodeApproveToken(best.collateralToken, destPool))
+      // Approve debt token to source pool (for repay)
+      // repay leaf data: [1: mode][20: debtToken][20: pool] — pool at bytes 21-40
+      const repayPool = `0x${repayLeaf.data.slice(44, 84)}` as Address
+      calls.push(encodeApproveToken(best.debtToken, repayPool))
+      // Approve debt token to Morpho (for flash loan repayment)
+      calls.push(encodeApproveToken(best.debtToken, morphoPool))
+
+      // settleWithFlashLoan
+      calls.push(encodeSettleWithFlashLoan({
+        flashLoanAsset: best.debtToken,
+        flashLoanAmount,
+        flashLoanPool: morphoPool,
+        poolId: 0, // Morpho
+        maxFeeBps: BigInt(order.order.maxFeeBps),
+        solver: order.order.solver,
+        minSolverReputation: BigInt(order.order.minSolverReputation),
+        deadline: order.order.deadline,
+        signature: order.signature,
+        orderData: order.order.orderData,
+        executionData,
+        fillerCalldata,
+      }))
+
+      const txHash = await walletClient.writeContract({
+        address: verato,
+        abi: multicallAbi,
+        functionName: 'multicall',
+        args: [calls],
+      })
+      return txHash
     }
   }
 

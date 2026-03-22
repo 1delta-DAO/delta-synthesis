@@ -7,5 +7,5 @@ export type { PoolInfo } from './pools.js'
 export { evaluateMigrations } from './evaluate.js'
 export type { CollateralMigration, CollateralSwapMigration, DebtMigration, MigrationCandidate, EvaluationResult } from './evaluate.js'
 
-export { buildCollateralMigration, buildCollateralSwapMigration } from './build-execution.js'
+export { buildCollateralMigration, buildCollateralSwapMigration, buildDebtMigration } from './build-execution.js'
 export type { BuiltSettlement } from './build-execution.js'

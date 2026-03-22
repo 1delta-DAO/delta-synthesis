@@ -49,7 +49,7 @@ function UserPositionsPanel({
   chainId: string
 }) {
   const { address } = useAccount()
-  const { positions, loading, error } = useUserPositions(address, address ? parseInt(chainId) : null)
+  const { positions, loading, error, refetch } = useUserPositions(address, address ? parseInt(chainId) : null)
 
   if (!address) return null
 
@@ -57,7 +57,17 @@ function UserPositionsPanel({
 
   return (
     <section className="mb-4">
-      <h2 className="text-sm font-semibold text-amber-400 mb-2">Your Positions</h2>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-sm font-semibold text-amber-400">Your Positions</h2>
+        <button
+          onClick={refetch}
+          disabled={loading}
+          className="text-xs text-gray-400 hover:text-amber-400 transition-colors disabled:opacity-50"
+          title="Refresh positions"
+        >
+          {loading ? '...' : '\u21BB'}
+        </button>
+      </div>
       {loading && (
         <div className="flex items-center gap-2 py-3 px-3 rounded-xl bg-gray-900/40 border border-gray-800/80">
           <div className="w-3.5 h-3.5 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />

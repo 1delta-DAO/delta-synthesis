@@ -355,10 +355,16 @@ function ChainBanner() {
 
 function App() {
   return (
-    <div className="min-h-screen bg-gray-950 text-white">
-      <header className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
+    <div className="min-h-screen bg-gray-950 text-white relative overflow-hidden">
+      {/* Background gradient */}
+      <div className="fixed inset-0 pointer-events-none">
+        <div className="absolute top-0 left-1/4 w-[600px] h-[600px] bg-amber-500/[0.03] rounded-full blur-[120px]" />
+        <div className="absolute top-1/3 right-0 w-[500px] h-[500px] bg-emerald-500/[0.03] rounded-full blur-[100px]" />
+        <div className="absolute bottom-0 left-0 w-[400px] h-[400px] bg-indigo-500/[0.02] rounded-full blur-[100px]" />
+      </div>
+      <header className="relative border-b border-gray-800/80 backdrop-blur-sm px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <VeratoLogo className="h-9 w-9" />
+          <VeratoLogo className="h-12 w-12" />
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Verato</h1>
             <p className="text-sm text-gray-500">Agent Settlement Gateway on {APP_CHAIN.name}</p>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { PORTAL_PROXY_URL } from '../config/constants'
 
 // ── Types ────────────────────────────────────────────────────────
@@ -149,6 +149,9 @@ export function useUserPositions(
   const [positions, setPositions] = useState<LenderPositions[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  const refetch = useCallback(() => setRefreshKey(k => k + 1), [])
 
   useEffect(() => {
     if (!account || !chainId) {
@@ -209,7 +212,7 @@ export function useUserPositions(
 
     void fetchPositions()
     return () => { cancelled = true }
-  }, [account, chainId])
+  }, [account, chainId, refreshKey])
 
-  return { positions, loading, error }
+  return { positions, loading, error, refetch }
 }
