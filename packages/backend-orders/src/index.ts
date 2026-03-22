@@ -251,6 +251,12 @@ export default {
       return handleUpdateStatus(statusMatch[1], request, env)
     }
 
+    // DELETE /orders — clear all orders
+    if (path === '/orders' && request.method === 'DELETE') {
+      await env.DB.prepare('DELETE FROM orders').run()
+      return json({ cleared: true })
+    }
+
     return json({ error: 'Not found' }, 404)
   },
 } satisfies ExportedHandler<Env>

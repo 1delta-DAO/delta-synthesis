@@ -9,8 +9,10 @@ import {
   LendingOp,
   buildUnsignedOrder,
   type Condition,
+  type Conversion,
   type BuildOrderInput,
 } from '../settlement'
+import { getOracleAddress } from '../config/constants'
 
 // ── Lender IDs for known forks ──────────────────────────────────────────
 // Matches DeltaEnums.sol: UP_TO_AAVE_V3=1000, UP_TO_AAVE_V2=2000, ..., UP_TO_MORPHO=5000
@@ -62,7 +64,49 @@ function encodeMorphoData(
   ])
 }
 
-function selectionToLeaves(config: CollectedConfig, poolAddress: Address): LeafInput[] {
+/**
+ * Auto-generate pairwise conversions from all unique tokens across selected entries.
+ * Each pair gets a conversion in both directions so the solver can swap either way.
+ */
+function autoConversions(config: CollectedConfig, swapTolerance: bigint): Conversion[] {
+  const oracle = getOracleAddress(config.chainId)
+  if (oracle === '0x0000000000000000000000000000000000000000') return []
+
+  // Collect all unique underlying token addresses
+  const tokens = new Set<string>()
+  for (const entry of config.entries) {
+    if (entry.protocol === 'aave') {
+      const aave = entry as CollectedAaveConfig
+      for (const t of aave.tokens) {
+        tokens.add(t.underlying.toLowerCase())
+      }
+    } else if (entry.protocol === 'morpho-market') {
+      const m = entry as CollectedMorphoMarket
+      tokens.add(m.loanToken.toLowerCase())
+      tokens.add(m.collateralToken.toLowerCase())
+    }
+  }
+
+  const tokenList = [...tokens]
+  const conversions: Conversion[] = []
+
+  // Generate all directed pairs
+  for (let i = 0; i < tokenList.length; i++) {
+    for (let j = 0; j < tokenList.length; j++) {
+      if (i === j) continue
+      conversions.push({
+        assetIn: tokenList[i] as Address,
+        assetOut: tokenList[j] as Address,
+        oracle,
+        swapTolerance,
+      })
+    }
+  }
+
+  return conversions
+}
+
+function selectionToLeaves(config: CollectedConfig, chainId: string): LeafInput[] {
   const leaves: LeafInput[] = []
   const seen = new Set<string>()
 
@@ -71,17 +115,18 @@ function selectionToLeaves(config: CollectedConfig, poolAddress: Address): LeafI
     if (entry.protocol === 'aave') {
       const aave = entry as CollectedAaveConfig
       const lenderId = lenderIdForFork(aave.fork)
+      const pool = getPoolAddress(chainId, aave.fork)
 
       for (const token of aave.tokens) {
         if (token.collateralToken) {
-          const data = encodePacked(['address'], [poolAddress])
+          const data = encodePacked(['address'], [pool])
           const key = `${LendingOp.DEPOSIT}:${lenderId}:${data}`
           if (!seen.has(key)) {
             seen.add(key)
             leaves.push({ op: LendingOp.DEPOSIT, lenderId, data, label: `Deposit ${token.symbol} (${aave.fork})` })
           }
 
-          const wdData = encodePacked(['address', 'address'], [token.collateralToken as Address, poolAddress])
+          const wdData = encodePacked(['address', 'address'], [token.collateralToken as Address, pool])
           const wdKey = `${LendingOp.WITHDRAW}:${lenderId}:${wdData}`
           if (!seen.has(wdKey)) {
             seen.add(wdKey)
@@ -90,14 +135,14 @@ function selectionToLeaves(config: CollectedConfig, poolAddress: Address): LeafI
         }
 
         if (token.debtToken) {
-          const brData = encodePacked(['uint8', 'address', 'address'], [2, poolAddress, token.debtToken as Address])
+          const brData = encodePacked(['uint8', 'address', 'address'], [2, pool, token.debtToken as Address])
           const brKey = `${LendingOp.BORROW}:${lenderId}:${brData}`
           if (!seen.has(brKey)) {
             seen.add(brKey)
             leaves.push({ op: LendingOp.BORROW, lenderId, data: brData, label: `Borrow ${token.symbol} (${aave.fork})` })
           }
 
-          const rpData = encodePacked(['uint8', 'address', 'address'], [2, poolAddress, token.debtToken as Address])
+          const rpData = encodePacked(['uint8', 'address', 'address'], [2, pool, token.debtToken as Address])
           const rpKey = `${LendingOp.REPAY}:${lenderId}:${rpData}`
           if (!seen.has(rpKey)) {
             seen.add(rpKey)
@@ -251,11 +296,13 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
 
   const [minReputation, setMinReputation] = useState(0)
   const [minHealthFactor, setMinHealthFactor] = useState(1.1)
-  const [maxFeeBps, setMaxFeeBps] = useState(50000)
+  const [maxFeePct, setMaxFeePct] = useState(0.5) // percentage, converted to 1e7 units internally
+  const maxFeeBps = Math.round(maxFeePct * 1e5) // 0.5% → 50000 (1e7 denominator: 100% = 1e7)
+  const [swapTolerancePct, setSwapTolerancePct] = useState(0.5) // 0.5% swap tolerance
+  const swapTolerance = BigInt(Math.round(swapTolerancePct * 1e5)) // 1e7 denominator
   const [deadlineMinutes, setDeadlineMinutes] = useState(60)
 
   const chainId = Number(config.chainId)
-  const poolAddress = getPoolAddress(config.chainId)
   const veratoAddress = getVeratoAddress(config.chainId)
 
   // Hooks
@@ -275,7 +322,7 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
   } = useOrderSubmission(chainId)
 
   // Derive leaves from selection
-  const leafInputs = useMemo(() => selectionToLeaves(config, poolAddress), [config, poolAddress])
+  const leafInputs = useMemo(() => selectionToLeaves(config, config.chainId), [config])
 
   // Derive required permission signatures
   const permissionRequests = useMemo(
@@ -291,7 +338,10 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
     if (minHealthFactor > 0) {
       const pools = new Set<string>()
       for (const entry of config.entries) {
-        if (entry.protocol === 'aave') pools.add(poolAddress)
+        if (entry.protocol === 'aave') {
+          const aave = entry as CollectedAaveConfig
+          pools.add(getPoolAddress(config.chainId, aave.fork))
+        }
       }
       for (const pool of pools) {
         conditions.push({
@@ -303,9 +353,11 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
       }
     }
 
+    const conversions = autoConversions(config, swapTolerance)
     const deadline = Math.floor(Date.now() / 1000) + deadlineMinutes * 60
     const input: BuildOrderInput = {
       leaves: leafInputs,
+      conversions,
       conditions,
       maxFeeBps,
       solver: zeroAddress,
@@ -316,7 +368,7 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
     }
 
     return buildUnsignedOrder(input)
-  }, [leafInputs, minHealthFactor, maxFeeBps, deadlineMinutes, minReputation, config, poolAddress, veratoAddress, chainId])
+  }, [leafInputs, minHealthFactor, maxFeeBps, deadlineMinutes, minReputation, config, veratoAddress, chainId, swapTolerance])
 
   // Check which permits are still needed
   const signedLabels = new Set(signedPermissions.map(p => p.request.label))
@@ -329,12 +381,17 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
 
     const conditions: Condition[] = []
     if (minHealthFactor > 0) {
-      conditions.push({
-        type: 'aave',
-        lenderId: 0,
-        pool: poolAddress,
-        minHealthFactor: BigInt(Math.floor(minHealthFactor * 1e18)),
-      })
+      for (const entry of config.entries) {
+        if (entry.protocol === 'aave') {
+          const aave = entry as CollectedAaveConfig
+          conditions.push({
+            type: 'aave',
+            lenderId: lenderIdForFork(aave.fork),
+            pool: getPoolAddress(config.chainId, aave.fork),
+            minHealthFactor: BigInt(Math.floor(minHealthFactor * 1e18)),
+          })
+        }
+      }
     }
 
     await submitOrder({
@@ -351,7 +408,7 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
       solver: zeroAddress,
       minSolverReputation: minReputation,
     })
-  }, [preview, signedPermissions, deadlineMinutes, maxFeeBps, minReputation, minHealthFactor, poolAddress, leafInputs, submitOrder])
+  }, [preview, signedPermissions, deadlineMinutes, maxFeeBps, minReputation, minHealthFactor, config, leafInputs, submitOrder])
 
   if (leafInputs.length === 0) {
     return (
@@ -415,15 +472,27 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
           <span className="text-xs text-gray-600">0 = no HF check</span>
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">Max Fee (1e7 units)</label>
+          <label className="block text-xs text-gray-500 mb-1">Max Fee (%)</label>
           <input
             type="number"
-            value={maxFeeBps}
-            onChange={(e) => setMaxFeeBps(Number(e.target.value))}
+            value={maxFeePct}
+            onChange={(e) => setMaxFeePct(Number(e.target.value))}
+            step={0.01}
             className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white"
             min={0}
           />
-          <span className="text-xs text-gray-600">50000 = 0.5%</span>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">Swap Tolerance (%)</label>
+          <input
+            type="number"
+            value={swapTolerancePct}
+            onChange={(e) => setSwapTolerancePct(Number(e.target.value))}
+            step={0.01}
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white"
+            min={0}
+          />
+          <span className="text-xs text-gray-600">Oracle-verified slippage</span>
         </div>
         <div>
           <label className="block text-xs text-gray-500 mb-1">Deadline (minutes)</label>
@@ -448,7 +517,7 @@ export default function OrderBuilder({ config }: { config: CollectedConfig }) {
             <div><span className="text-gray-500">conditions:</span> <span className="text-gray-300">{minHealthFactor > 0 ? `HF ≥ ${minHealthFactor}` : 'none'}</span></div>
             <div><span className="text-gray-500">solver:</span> <span className="text-gray-300">permissionless</span></div>
             <div><span className="text-gray-500">minReputation:</span> <span className="text-gray-300">{minReputation}</span></div>
-            <div><span className="text-gray-500">maxFee:</span> <span className="text-gray-300">{(maxFeeBps / 1e5).toFixed(2)}%</span></div>
+            <div><span className="text-gray-500">maxFee:</span> <span className="text-gray-300">{maxFeePct.toFixed(2)}%</span></div>
           </div>
         </div>
       )}

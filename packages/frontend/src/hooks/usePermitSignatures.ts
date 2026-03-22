@@ -77,13 +77,22 @@ export function usePermitSignatures(settlementAddress: Address) {
 
       switch (request.kind) {
         case 'ERC2612_PERMIT': {
-          // Read nonce from the token
-          nonce = await publicClient.readContract({
-            address: request.targetAddress,
-            abi: noncesAbi,
-            functionName: 'nonces',
-            args: [address],
-          })
+          // Read nonce — try nonces(), fall back to _nonces() for janky Aave forks
+          try {
+            nonce = await publicClient.readContract({
+              address: request.targetAddress,
+              abi: noncesAbi,
+              functionName: 'nonces',
+              args: [address],
+            })
+          } catch {
+            nonce = await publicClient.readContract({
+              address: request.targetAddress,
+              abi: _noncesAbi,
+              functionName: '_nonces',
+              args: [address],
+            })
+          }
 
           const tokenName = request.extra?.tokenName ?? await publicClient.readContract({
             address: request.targetAddress,

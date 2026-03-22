@@ -19,6 +19,10 @@ export interface Position {
   depositsUSD: number
   debtUSD: number
   collateralEnabled: boolean
+  /** Per-asset supply APR (already in %, e.g. 3.5 = 3.5%) */
+  depositApr?: number | null
+  /** Per-asset borrow APR (already in %, e.g. 5.2 = 5.2%) */
+  borrowApr?: number | null
   underlyingInfo: {
     asset: AssetInfo
     oraclePrice?: { oraclePrice: number; oraclePriceUsd: number }

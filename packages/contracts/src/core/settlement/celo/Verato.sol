@@ -206,63 +206,81 @@ contract Verato is
     //  Intent: oracle-verified swaps
     // ═════════════════════════════════════════════════════════════════════════
 
+    /**
+     * @notice Execute solver-provided swaps, each verified against a user-signed conversion.
+     *
+     * fillerCalldata layout: [1: numSwaps][swap0...][swap1...]
+     * Each swap: [1: conversionIndex][14: amountIn][20: target][2: calldataLen][calldata...]
+     *
+     * The conversionIndex references the conversion in settlementData (0-based).
+     * assetIn/assetOut are read from the referenced conversion — no duplication.
+     */
     function _executeIntent(
         address, bytes memory settlementData, bytes memory fillerCalldata,
         AssetDelta[] memory deltas, uint256 deltaCount
     ) internal override returns (uint256 newDeltaCount) {
         if (fillerCalldata.length == 0) return deltaCount;
         newDeltaCount = deltaCount;
-        uint256 numConversions;
-        assembly { numConversions := shr(248, mload(add(settlementData, 0x20))) }
-        uint256 sdOffset = 1;
-        uint256 fcOffset;
-        for (uint256 i; i < numConversions;) {
+
+        uint256 numSwaps;
+        assembly { numSwaps := shr(248, mload(add(fillerCalldata, 0x20))) }
+
+        uint256 fcOffset = 1; // skip numSwaps byte
+        for (uint256 i; i < numSwaps;) {
             uint256 fcLen;
-            (newDeltaCount, fcLen) = _executeSwap(settlementData, sdOffset, fillerCalldata, fcOffset, deltas, newDeltaCount);
-            sdOffset += 68;
+            (newDeltaCount, fcLen) = _executeSwap(settlementData, fillerCalldata, fcOffset, deltas, newDeltaCount);
             fcOffset += fcLen;
             unchecked { ++i; }
         }
     }
 
+    /**
+     * @notice Execute a single filler swap using a conversion index.
+     *
+     * Filler swap layout: [1: convIndex][14: amountIn][20: target][2: calldataLen][calldata...]
+     * Total header: 37 bytes (was 76 — saves 39 bytes per swap by eliminating redundant addresses)
+     */
     function _executeSwap(
-        bytes memory settlementData, uint256 sdOffset,
+        bytes memory settlementData,
         bytes memory fillerCalldata, uint256 fcOffset,
         AssetDelta[] memory deltas, uint256 deltaCount
     ) private returns (uint256 newDeltaCount, uint256 fcConsumed) {
-        address sdAssetIn; address sdAssetOut; address oracle; uint256 swapTolerance;
+        uint256 convIndex; uint256 amountIn; address target; uint256 swapCalldataLen;
         assembly {
-            let sd := add(add(settlementData, 0x20), sdOffset)
-            sdAssetIn := shr(96, mload(sd))
-            sdAssetOut := shr(96, mload(add(sd, 20)))
+            let fc := add(add(fillerCalldata, 0x20), fcOffset)
+            convIndex := shr(248, mload(fc))
+            amountIn := shr(144, mload(add(fc, 1)))
+            target := shr(96, mload(add(fc, 15)))
+            swapCalldataLen := and(0xffff, shr(240, mload(add(fc, 35))))
+        }
+
+        // Read conversion from settlementData at the specified index
+        // Layout: [1: numConversions][68 bytes per conversion: assetIn|assetOut|oracle|tolerance]
+        address assetIn; address assetOut; address oracle; uint256 swapTolerance;
+        assembly {
+            let sd := add(add(settlementData, 0x20), add(1, mul(convIndex, 68)))
+            assetIn := shr(96, mload(sd))
+            assetOut := shr(96, mload(add(sd, 20)))
             oracle := shr(96, mload(add(sd, 40)))
             swapTolerance := shr(192, mload(add(sd, 60)))
         }
-        address fcAssetIn; address fcAssetOut; uint256 amountIn; address target; uint256 swapCalldataLen;
-        assembly {
-            let fc := add(add(fillerCalldata, 0x20), fcOffset)
-            fcAssetIn := shr(96, mload(fc))
-            fcAssetOut := shr(96, mload(add(fc, 20)))
-            amountIn := shr(144, mload(add(fc, 40)))
-            target := shr(96, mload(add(fc, 54)))
-            swapCalldataLen := and(0xffff, shr(240, mload(add(fc, 74))))
-        }
-        if (fcAssetIn != sdAssetIn || fcAssetOut != sdAssetOut) revert ConversionMismatch();
+
+        // Resolve amountIn if zero (use contract balance)
         if (amountIn == 0) {
             assembly {
                 let ptr := mload(0x40)
                 mstore(ptr, 0x70a0823100000000000000000000000000000000000000000000000000000000)
                 mstore(add(ptr, 4), address())
-                if iszero(staticcall(gas(), fcAssetIn, ptr, 0x24, ptr, 0x20)) { returndatacopy(0, 0, returndatasize()) revert(0, returndatasize()) }
+                if iszero(staticcall(gas(), assetIn, ptr, 0x24, ptr, 0x20)) { returndatacopy(0, 0, returndatasize()) revert(0, returndatasize()) }
                 amountIn := mload(ptr)
             }
-            if (amountIn == 0) { return (deltaCount, 76 + swapCalldataLen); }
+            if (amountIn == 0) { return (deltaCount, 37 + swapCalldataLen); }
         }
-        uint256 amountOut = _forwardSwap(fcAssetIn, fcAssetOut, amountIn, target, fillerCalldata, fcOffset, swapCalldataLen);
-        _verifySwapOutput(oracle, fcAssetIn, fcAssetOut, amountIn, amountOut, swapTolerance);
-        newDeltaCount = _updateDelta(deltas, deltaCount, fcAssetIn, -int256(amountIn), 0);
-        newDeltaCount = _updateDelta(deltas, newDeltaCount, fcAssetOut, int256(amountOut), 0);
-        fcConsumed = 76 + swapCalldataLen;
+        uint256 amountOut = _forwardSwap(assetIn, assetOut, amountIn, target, fillerCalldata, fcOffset, swapCalldataLen);
+        _verifySwapOutput(oracle, assetIn, assetOut, amountIn, amountOut, swapTolerance);
+        newDeltaCount = _updateDelta(deltas, deltaCount, assetIn, -int256(amountIn), 0);
+        newDeltaCount = _updateDelta(deltas, newDeltaCount, assetOut, int256(amountOut), 0);
+        fcConsumed = 37 + swapCalldataLen;
     }
 
     function _forwardSwap(
@@ -287,10 +305,13 @@ contract Verato is
         }
         bytes memory swapCalldata = new bytes(swapCalldataLen);
         assembly {
-            let src := add(add(fillerCalldata, 0x20), add(fcOffset, 76))
+            let src := add(add(fillerCalldata, 0x20), add(fcOffset, 37))
             let dest := add(swapCalldata, 0x20)
             for { let j := 0 } lt(j, swapCalldataLen) { j := add(j, 32) } { mstore(add(dest, j), mload(add(src, j))) }
         }
+        // Approve the swap target to spend assetIn from the forwarder
+        bytes memory approveCalldata = abi.encodeWithSelector(0x095ea7b3, target, amountIn);
+        SettlementForwarder(fwd).execute(assetIn, approveCalldata);
         SettlementForwarder(fwd).execute(target, swapCalldata);
         SettlementForwarder(fwd).sweep(assetOut);
         assembly {

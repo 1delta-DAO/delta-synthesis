@@ -75,8 +75,8 @@ export type Condition =
 // ── Filler swap calldata ────────────────────────────────────────────────
 
 export interface FillerSwap {
-  assetIn: Address;
-  assetOut: Address;
+  /** Index into the user-signed conversions array in settlementData (0-based) */
+  conversionIndex: number;
   /** 0 = use contract balance */
   amountIn: bigint;
   target: Address;

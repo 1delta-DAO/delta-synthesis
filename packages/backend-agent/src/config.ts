@@ -20,8 +20,8 @@ export const CONTRACTS_BY_CHAIN: Record<number, {
 }> = {
   // Celo mainnet
   42220: {
-    settlement: '0x9C2295A43C5b938b079f9057b82E4da7C832753A',
-    forwarder:  '0x90d137E4845Ea9C5e4c9Bd8ABf8A1f9f04d0DE65',
+    settlement: '0x8bDed3d811501273Fe60da50fbA91FD0bC25B9F1',
+    forwarder:  '0x54b3c0aeB93b3A00675cb7bcC88ee9B0a25a4223',
     aaveOracle: '0x1e693D088ceFD1E95ba4c4a5F7EeA41a1Ec37e8b',
     morphoPool: '0xBeA21C9b7f6F5e3BfE98A3Ba867FC4Cf34a5f4F3',
   },

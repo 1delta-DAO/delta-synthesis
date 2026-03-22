@@ -81,7 +81,6 @@ export function buildMerkleTree(
   }
 
   const hashes = leafInputs.map((l) => computeLeafHash(l.op, l.lenderId, l.data))
-  const proofs: Hex[][] = hashes.map(() => [])
 
   if (hashes.length === 1) {
     return {
@@ -90,28 +89,36 @@ export function buildMerkleTree(
     }
   }
 
-  let currentLayer = [...hashes]
-  let indices = hashes.map((_, i) => i)
+  // Pad to next power of 2 with duplicate of last hash
+  const n = hashes.length
+  let size = 1
+  while (size < n) size *= 2
+  const padded = [...hashes]
+  while (padded.length < size) padded.push(padded[padded.length - 1])
 
-  while (currentLayer.length > 1) {
-    const nextLayer: Hex[] = []
-    const nextIndices: number[] = []
-
-    for (let i = 0; i < currentLayer.length; i += 2) {
-      if (i + 1 < currentLayer.length) {
-        const parent = hashPair(currentLayer[i], currentLayer[i + 1])
-        nextLayer.push(parent)
-        proofs[indices[i]].push(currentLayer[i + 1])
-        proofs[indices[i + 1]].push(currentLayer[i])
-        nextIndices.push(indices[i])
-      } else {
-        nextLayer.push(currentLayer[i])
-        nextIndices.push(indices[i])
-      }
+  // Build tree bottom-up, storing all nodes by level
+  const levels: Hex[][] = [padded]
+  let current = padded
+  while (current.length > 1) {
+    const next: Hex[] = []
+    for (let i = 0; i < current.length; i += 2) {
+      next.push(hashPair(current[i], current[i + 1]))
     }
+    levels.push(next)
+    current = next
+  }
 
-    currentLayer = nextLayer
-    indices = nextIndices
+  // Extract proofs by walking the tree for each original leaf
+  const proofs: Hex[][] = []
+  for (let i = 0; i < n; i++) {
+    const proof: Hex[] = []
+    let idx = i
+    for (let level = 0; level < levels.length - 1; level++) {
+      const sibling = idx ^ 1 // flip last bit to get sibling
+      proof.push(levels[level][sibling])
+      idx = idx >> 1 // parent index
+    }
+    proofs.push(proof)
   }
 
   const leaves: MerkleLeaf[] = leafInputs.map((l, i) => ({
@@ -120,16 +127,34 @@ export function buildMerkleTree(
     proof: proofs[i],
   }))
 
-  return { root: currentLayer[0], leaves }
+  return { root: levels[levels.length - 1][0], leaves }
 }
 
 // ── Encoding ────────────────────────────────────────────────────────────
 
-export function encodeSettlementData(conditions: Condition[]): Hex {
+export interface Conversion {
+  assetIn: Address
+  assetOut: Address
+  oracle: Address
+  /** Tolerance in 1e7 units (e.g. 50000 = 0.5%) */
+  swapTolerance: bigint
+}
+
+export function encodeSettlementData(conversions: Conversion[], conditions: Condition[]): Hex {
   const parts: Hex[] = []
 
-  // numConversions = 0 (frontend doesn't create swaps)
-  parts.push(numberToHex(0, { size: 1 }))
+  // numConversions
+  parts.push(numberToHex(conversions.length, { size: 1 }))
+
+  // Each conversion: 20 + 20 + 20 + 8 = 68 bytes
+  for (const c of conversions) {
+    parts.push(
+      encodePacked(
+        ['address', 'address', 'address', 'uint64'],
+        [c.assetIn, c.assetOut, c.oracle, c.swapTolerance]
+      )
+    )
+  }
 
   // numConditions
   parts.push(numberToHex(conditions.length, { size: 1 }))
@@ -205,6 +230,7 @@ export async function signVeratoOrder(
 
 export interface BuildOrderInput {
   leaves: Array<{ op: number; lenderId: number; data: Hex }>
+  conversions?: Conversion[]
   conditions: Condition[]
   maxFeeBps: number
   solver: Address
@@ -216,7 +242,7 @@ export interface BuildOrderInput {
 
 export function buildUnsignedOrder(input: BuildOrderInput) {
   const { root, leaves } = buildMerkleTree(input.leaves)
-  const settlementData = encodeSettlementData(input.conditions)
+  const settlementData = encodeSettlementData(input.conversions ?? [], input.conditions)
   const orderData = encodeOrderData(root, settlementData)
 
   return {

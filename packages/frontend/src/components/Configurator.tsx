@@ -86,8 +86,12 @@ function UserPositionsPanel({
                   <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-800/50 bg-amber-500/5">
                     <span className="text-xs font-semibold text-white">{lenderName}</span>
                     <div className="flex gap-3 text-[10px] text-gray-500">
-                      <span>Health: <span className={acct.health > 1.5 ? 'text-emerald-400' : acct.health > 1.1 ? 'text-amber-400' : 'text-red-400'}>{acct.health > 100 ? '∞' : acct.health.toFixed(2)}</span></span>
+                      <span>Health: <span className={acct.health == null ? 'text-gray-500' : acct.health > 1.5 ? 'text-emerald-400' : acct.health > 1.1 ? 'text-amber-400' : 'text-red-400'}>{acct.health == null ? '–' : acct.health > 100 ? '∞' : acct.health.toFixed(2)}</span></span>
                       <span>NAV: {formatUsd(acct.balanceData.nav)}</span>
+                      {/* Account-level net APR (value from API is already in %) */}
+                      {acct.aprData && (
+                        <span>APR: <span className={acct.aprData.apr >= 0 ? 'text-emerald-400' : 'text-red-400'}>{acct.aprData.apr.toFixed(2)}%</span></span>
+                      )}
                     </div>
                   </div>
                   <div className="divide-y divide-gray-800/30">
@@ -107,11 +111,19 @@ function UserPositionsPanel({
                             {hasDeposit && (
                               <span className="text-emerald-400" title="Deposited">
                                 +{formatUsd(pos.depositsUSD)}
+                                {/* Per-asset supply APR (value from API is already in %) */}
+                                {pos.depositApr != null && (
+                                  <span className="text-emerald-600 ml-1 text-[10px]">{pos.depositApr.toFixed(2)}%</span>
+                                )}
                               </span>
                             )}
                             {hasDebt && (
                               <span className="text-red-400" title="Borrowed">
                                 -{formatUsd(pos.debtUSD)}
+                                {/* Per-asset borrow APR (value from API is already in %) */}
+                                {pos.borrowApr != null && (
+                                  <span className="text-red-600 ml-1 text-[10px]">{pos.borrowApr.toFixed(2)}%</span>
+                                )}
                               </span>
                             )}
                             {pos.collateralEnabled && (

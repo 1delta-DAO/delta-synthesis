@@ -13,6 +13,7 @@ const DEFAULT_BASE_URL = 'https://trade-api.gateway.uniswap.org/v1'
 const REQUIRED_HEADERS = {
   'Content-Type': 'application/json',
   'x-universal-router-version': '2.0',
+  'x-permit2-disabled': 'true',
 } as const
 
 function headers(apiKey: string): Record<string, string> {
@@ -35,8 +36,8 @@ export async function fetchSwapRoute(
     swapper: request.swapper,
     tokenIn: request.tokenIn,
     tokenOut: request.tokenOut,
-    tokenInChainId: request.tokenInChainId,
-    tokenOutChainId: request.tokenOutChainId,
+    tokenInChainId: Number(request.tokenInChainId),
+    tokenOutChainId: Number(request.tokenOutChainId),
     amount: request.amount,
     type: request.type,
     slippageTolerance: request.slippageTolerance ?? 0.5,
@@ -93,6 +94,8 @@ export interface BuildFillerSwapRequest {
   assetOut: Address
   /** Amount in smallest unit. Use 0n if the contract already holds the tokens (e.g. from a preceding withdraw). */
   amountIn: bigint
+  /** Index into the user-signed conversions array in settlementData */
+  conversionIndex: number
   /** Chain ID (as string, e.g. "42220" for Celo) */
   chainId: string
   /** Slippage tolerance as percentage 0-100 (e.g. 0.5 for 0.5%) */
@@ -126,7 +129,8 @@ export async function buildFillerSwap(
       amount: request.amountIn > 0n ? request.amountIn.toString() : '0',
       type: 'EXACT_INPUT',
       slippageTolerance: request.slippageTolerance ?? 0.5,
-      routingPreference: 'CLASSIC',
+      routingPreference: 'BEST_PRICE',
+      protocols: ['V2', 'V3'],
     },
     config,
   )
@@ -134,26 +138,54 @@ export async function buildFillerSwap(
   if (quote.routing !== 'CLASSIC') {
     throw new Error(
       `Expected CLASSIC route but got ${quote.routing}. ` +
-      `Verato settlement requires AMM routing (use routingPreference: "CLASSIC").`,
+      `Verato settlement requires AMM routing — got UniswapX which is incompatible with the forwarder.`,
     )
   }
 
   const classic = quote as ClassicQuote
   const mp = classic.quote.methodParameters
 
-  if (!mp?.calldata || !mp?.to) {
-    throw new Error(
-      'Uniswap quote did not return methodParameters. ' +
-      'Ensure the Trading API is configured to return calldata.',
-    )
+  // If methodParameters are available (older API versions), use them directly
+  if (mp?.calldata && mp?.to) {
+    return {
+      conversionIndex: request.conversionIndex,
+      amountIn: request.amountIn,
+      target: mp.to as Address,
+      swapCalldata: mp.calldata as Hex,
+    }
+  }
+
+  // Step 2: Call /swap with the quote to get tx calldata from Uniswap's
+  // Proxy Universal Router (x-permit2-disabled uses direct approval pattern)
+  const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL
+  const swapRes = await fetch(`${baseUrl}/swap`, {
+    method: 'POST',
+    headers: headers(config.apiKey),
+    body: JSON.stringify({
+      quote: classic.quote,
+      includeGasInfo: false,
+      simulateTransaction: false,
+    }),
+  })
+
+  if (!swapRes.ok) {
+    const text = await swapRes.text()
+    throw new Error(`Uniswap swap calldata request failed (${swapRes.status}): ${text}`)
+  }
+
+  const swapData = (await swapRes.json()) as {
+    swap: { to: string; data: string; value: string }
+  }
+
+  if (!swapData.swap?.data || !swapData.swap?.to) {
+    throw new Error('Uniswap /swap did not return tx data')
   }
 
   return {
-    assetIn: request.assetIn,
-    assetOut: request.assetOut,
+    conversionIndex: request.conversionIndex,
     amountIn: request.amountIn,
-    target: mp.to as Address,
-    swapCalldata: mp.calldata as Hex,
+    target: swapData.swap.to as Address,
+    swapCalldata: swapData.swap.data as Hex,
   }
 }
 
@@ -165,8 +197,7 @@ export async function buildFillerSwap(
  */
 export function fillerSwapFromQuote(
   quote: ClassicQuote,
-  assetIn: Address,
-  assetOut: Address,
+  conversionIndex: number,
   amountIn: bigint,
 ): FillerSwap {
   const mp = quote.quote.methodParameters
@@ -179,8 +210,7 @@ export function fillerSwapFromQuote(
   }
 
   return {
-    assetIn,
-    assetOut,
+    conversionIndex,
     amountIn,
     target: mp.to as Address,
     swapCalldata: mp.calldata as Hex,

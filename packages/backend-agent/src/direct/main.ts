@@ -18,8 +18,19 @@ import { fetchUserPositions } from './api.js'
 import type { LenderPositions } from './api.js'
 import { buildSettlementContext } from './context.js'
 import { executeSettlement } from './settle.js'
-import { getWalletAddress } from './wallet.js'
-import { interpretPositions, fetchPools, evaluateMigrations } from '../interpret/index.js'
+import { getWalletAddress, sendTransaction } from './wallet.js'
+import {
+  interpretPositions,
+  fetchPools,
+  evaluateMigrations,
+  buildCollateralMigration,
+  buildCollateralSwapMigration,
+} from '../interpret/index.js'
+import {
+  encodeSettle,
+  encodeMulticall,
+  encodeApproveToken,
+} from '@delta-synthesis/settlement-sdk'
 
 /** Tool schema for the agent loop. */
 interface GenericTool {
@@ -85,12 +96,54 @@ export async function runSettlementFlow(
     }
 
     const best = evaluation.bestCandidate
+    const verato = settlement
+
     if (best.type === 'collateral_only') {
       console.log(`  Best: ${best.symbol} from ${best.sourceLender} → ${best.destLender} (+${best.improvement.toFixed(4)}% APY)`)
       console.log(`    withdraw leaf: ${best.withdrawLeafIndex}  deposit leaf: ${best.depositLeafIndex}`)
-      // TODO: build and submit the simple withdraw+deposit settlement tx
-      // For now, log the decision
-      return `COLLATERAL_MIGRATION: ${best.symbol} ${best.sourceLender} → ${best.destLender} improvement=${best.improvement.toFixed(4)}%`
+
+      const walletAddr = await getWalletAddress(chainId)
+      const built = buildCollateralMigration(order, best, verato, walletAddr as Address)
+
+      // Build multicall: approve token to dest pool + settle
+      const calls: `0x${string}`[] = []
+
+      // Approve the token to the destination pool (from the deposit leaf data)
+      const depositLeaf = order.order.leaves[best.depositLeafIndex!]
+      if (depositLeaf) {
+        const pool = `0x${depositLeaf.data.slice(2, 42)}` as Address
+        calls.push(encodeApproveToken(best.token, pool))
+      }
+
+      // Build the settle call with our constructed executionData
+      calls.push(encodeSettle({
+        maxFeeBps: BigInt(order.order.maxFeeBps),
+        solver: (order.order.solver ?? '0x0000000000000000000000000000000000000000') as Address,
+        minSolverReputation: BigInt(order.order.minSolverReputation ?? 0),
+        deadline: order.order.deadline,
+        signature: order.signature,
+        orderData: order.order.orderData,
+        executionData: built.executionData,
+        fillerCalldata: built.fillerCalldata,
+      }))
+
+      const txData = calls.length === 1 ? calls[0] : encodeMulticall(calls)
+
+      console.log(`\n  Submitting collateral migration tx…`)
+      const txHash = await sendTransaction(chainId, {
+        to: verato,
+        data: txData as `0x${string}`,
+      })
+      console.log(`  ✓ tx: ${txHash}`)
+
+      await markOrderFilled(ordersApiUrl, order.id, txHash)
+      return txHash
+    }
+
+    if (best.type === 'collateral_swap') {
+      console.log(`  Best: SWAP ${best.sourceSymbol} → ${best.destSymbol} from ${best.sourceLender} → ${best.destLender} (+${best.improvement.toFixed(4)}% APY)`)
+      // TODO: fetch Uniswap quote via buildFillerSwap(), then buildCollateralSwapMigration()
+      return `COLLATERAL_SWAP_PENDING: ${best.sourceSymbol}→${best.destSymbol} ${best.sourceLender}→${best.destLender}`
     }
   }
 

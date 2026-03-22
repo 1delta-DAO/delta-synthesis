@@ -1,0 +1,33 @@
+<svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="vg1" x1="4" y1="4" x2="44" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22d3ee" />
+      <stop offset="0.4" stop-color="#8b5cf6" />
+      <stop offset="1" stop-color="#ec4899" />
+    </linearGradient>
+    <linearGradient id="vg2" x1="13" y1="12" x2="35" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#67e8f9" />
+      <stop offset="0.5" stop-color="#a78bfa" />
+      <stop offset="1" stop-color="#f472b6" />
+    </linearGradient>
+    <linearGradient id="vg3" x1="15" y1="16" x2="33" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e0f2fe" />
+      <stop offset="0.35" stop-color="#67e8f9" />
+      <stop offset="0.7" stop-color="#c084fc" />
+      <stop offset="1" stop-color="#f472b6" />
+    </linearGradient>
+    <filter id="vglow">
+      <feGaussianBlur stdDeviation="1.5" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+  <polygon points="24,2 44,14 44,34 24,46 4,34 4,14" fill="url(#vg1)" />
+  <polygon points="24,7 39,16.5 39,31.5 24,41 9,31.5 9,16.5" fill="#07080f" />
+  <polygon points="24,11 35,18 35,30 24,37 13,30 13,18" fill="url(#vg2)" opacity="0.08" />
+  <path d="M15,18 L24,34 L33,18" stroke="url(#vg3)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#vglow)" />
+  <path d="M19,21 L24,30 L29,21" stroke="url(#vg2)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.45" />
+  <polygon points="24,9 26,12 24,15 22,12" fill="url(#vg3)" opacity="0.8" filter="url(#vglow)" />
+</svg>

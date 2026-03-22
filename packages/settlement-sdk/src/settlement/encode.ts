@@ -193,19 +193,21 @@ export function encodeExecutionData(
 /**
  * Encode fillerCalldata — the solver's swap execution data.
  *
- * Per swap (76 + swapCalldata.length bytes):
- *   [20: assetIn][20: assetOut][14: amountIn][20: target]
- *   [2: swapCalldataLen][swapCalldata...]
+ * Layout: [1: numSwaps][swap0...][swap1...]
+ * Per swap (37 + swapCalldata.length bytes):
+ *   [1: conversionIndex][14: amountIn][20: target][2: calldataLen][calldata...]
  */
 export function encodeFillerCalldata(swaps: FillerSwap[]): Hex {
   if (swaps.length === 0) return "0x";
 
   const parts: Hex[] = [];
+  // numSwaps prefix byte
+  parts.push(numberToHex(swaps.length, { size: 1 }));
   for (const swap of swaps) {
     parts.push(
       encodePacked(
-        ["address", "address", "uint112", "address"],
-        [swap.assetIn, swap.assetOut, swap.amountIn, swap.target]
+        ["uint8", "uint112", "address"],
+        [swap.conversionIndex, swap.amountIn, swap.target]
       )
     );
 

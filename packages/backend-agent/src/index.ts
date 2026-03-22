@@ -11,7 +11,7 @@
  * Anthropic is preferred.
  */
 
-import { createWalletClient, http, maxUint256, type Hex, type Address } from 'viem'
+import { createWalletClient, createPublicClient, http, maxUint256, erc20Abi, type Hex, type Address } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { celo } from 'viem/chains'
 import {
@@ -22,8 +22,13 @@ import {
   encodeSettle,
   veratoAbi,
   LenderRange,
+  buildFillerSwap,
 } from '@delta-synthesis/settlement-sdk'
 import type { StoredPermit } from './order.js'
+import { describeLeaves } from './order.js'
+import { fetchUserPositions } from './direct/api.js'
+import type { LenderPositions } from './direct/api.js'
+import { interpretPositions, fetchPools, evaluateMigrations, buildCollateralMigration, buildCollateralSwapMigration } from './interpret/index.js'
 import { initWallet, runAllSettlements } from './direct/index.js'
 import { setProviderKeys } from './providers/index.js'
 
@@ -41,6 +46,7 @@ const multicallAbi = [
 export interface Env {
   ANTHROPIC_API_KEY?: string
   OPENAI_API_KEY?: string
+  UNISWAP_API_KEY?: string
   PRIVATE_KEY: string
   VERATO_ADDRESS: string
   FORWARDER_ADDRESS: string
@@ -86,7 +92,7 @@ You are evaluating whether to fill the following signed order:
 
 Signer: ${order.signer}
 Deadline: ${new Date(order.order.deadline * 1000).toISOString()}
-Max Fee BPS: ${order.order.maxFeeBps}
+Max Fee: ${order.order.maxFeeBps} (1e7 denominator, i.e. ${(order.order.maxFeeBps / 1e7 * 100).toFixed(4)}%)
 Solver Restriction: ${order.order.solver}
 Min Solver Reputation: ${order.order.minSolverReputation}
 Chain: Celo (${order.order.chainId})
@@ -180,7 +186,9 @@ async function evaluateOrder(
   try {
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) throw new Error('No JSON in response')
-    const parsed = JSON.parse(jsonMatch[0])
+    // Strip JS-style comments that LLMs sometimes add inside JSON
+    const cleaned = jsonMatch[0].replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')
+    const parsed = JSON.parse(cleaned)
     return {
       shouldFill: parsed.shouldFill === true,
       reason: parsed.reason ?? 'no reason given',
@@ -276,13 +284,13 @@ function buildMulticallData(
   // For Morpho we don't need pool approvals (Morpho uses transferFrom from the caller).
   const approvedPools = new Set<string>()
   const CELO_ASSETS: Address[] = [
-    '0x765DE816845861e75A25fCA122bb6898B8B1282a', // cUSD
-    '0xD221812de1BD094f35587EE8E174B07B6167D9Af', // WETH
-    '0xcebA9300f2b948710d2653dD7B07f33A8B32118C', // USDC
-    '0x48065fbBE25f71C9282ddf5e1cd6D6A887483D5e', // USDT
-    '0xd8763CBa276a3738E6DE85b4b3bF5FDed6D6cA73', // cEUR
-    '0x471EcE3750Da237f93B8E339c536989b8978a438', // CELO
-    '0xe8537a3d056DA446677B9e9d6c5dB704EaAb4787', // cREAL
+    '0x765de816845861e75a25fca122bb6898b8b1282a', // cUSD
+    '0xd221812de1bd094f35587ee8e174b07b6167d9af', // WETH
+    '0xceba9300f2b948710d2653dd7b07f33a8b32118c', // USDC
+    '0x48065fbbe25f71c9282ddf5e1cd6d6a887483d5e', // USDT
+    '0xd8763cba276a3738e6de85b4b3bf5fded6d6ca73', // cEUR
+    '0x471ece3750da237f93b8e339c536989b8978a438', // CELO
+    '0xe8537a3d056da446677b9e9d6c5db704eaab4787', // cREAL
   ]
 
   for (const leaf of order.order.leaves) {
@@ -320,8 +328,10 @@ function buildMulticallData(
   return calls
 }
 
-async function executeSettlement(env: Env, order: OpenOrder, fillerCalldata: Hex): Promise<Hex> {
+async function executeSettlement(env: Env, order: OpenOrder, _llmFillerCalldata: Hex): Promise<Hex> {
   const account = privateKeyToAccount(env.PRIVATE_KEY as Hex)
+  const chainId = parseInt(env.CHAIN_ID)
+  const verato = env.VERATO_ADDRESS as Address
 
   const walletClient = createWalletClient({
     account,
@@ -329,13 +339,186 @@ async function executeSettlement(env: Env, order: OpenOrder, fillerCalldata: Hex
     transport: http(env.RPC_URL),
   })
 
+  // ── Build executionData from positions + leaves ──────────────
+  // The order has executionData=0x — the agent must construct it.
+  const leafDescriptions = describeLeaves(order.order.leaves.map(l => ({
+    ...l,
+    lenderId: l.lenderId ?? (l as any).lender ?? 0,
+  })))
+
+  let rawPositions: any[]
+  try {
+    rawPositions = await fetchUserPositions(order.signer, chainId)
+  } catch (e) {
+    console.log(`  Position fetch failed: ${e instanceof Error ? e.message : e}`)
+    rawPositions = []
+  }
+  const userSummary = interpretPositions(order.signer, String(chainId), rawPositions as unknown as LenderPositions[])
+  console.log(`  User: lenders=${userSummary.lenders.length} debt=$${userSummary.totalDebtUsd.toFixed(2)} deposits=$${userSummary.totalDepositsUsd.toFixed(2)}`)
+
+  let executionData: Hex = '0x'
+  let fillerCalldata: Hex = '0x'
+
+  if (!userSummary.hasAnyDebt && userSummary.lenders.length > 0) {
+    // Collateral-only migration
+    const pools = await fetchPools(chainId)
+    console.log(`  Pools: ${pools.length}`)
+    const evaluation = evaluateMigrations(userSummary, pools, leafDescriptions)
+    console.log(`  Candidates: ${evaluation.candidates.length} best: ${evaluation.bestCandidate?.type ?? 'none'}`)
+
+    // Prefer collateral_only (no swap needed), fall back to collateral_swap if we have a Uniswap key
+    const collateralOnly = evaluation.candidates.find(c => c.type === 'collateral_only')
+    const collateralSwap = evaluation.candidates.find(c => c.type === 'collateral_swap')
+    const best = collateralOnly ?? (env.UNISWAP_API_KEY ? collateralSwap : null) ?? evaluation.bestCandidate
+
+    if (best && (best.type === 'collateral_only' || best.type === 'collateral_swap')) {
+      const storedOrder = {
+        id: order.id, createdAt: 0, status: 'open' as const,
+        signer: order.signer as Address, signature: order.signature,
+        order: order.order, permits: order.permits ?? [],
+      }
+
+      let built: { executionData: Hex; fillerCalldata: Hex }
+
+      if (best.type === 'collateral_only') {
+        console.log(`  Building collateral migration: ${best.symbol} ${best.sourceLender} → ${best.destLender}`)
+        built = buildCollateralMigration(storedOrder, best, verato, account.address)
+      } else {
+        // collateral_swap — need Uniswap quote
+        if (!env.UNISWAP_API_KEY) {
+          console.log(`  Swap candidate found but no UNISWAP_API_KEY — skipping`)
+          built = { executionData: '0x' as Hex, fillerCalldata: '0x' as Hex }
+        } else {
+          console.log(`  Building collateral swap: ${best.sourceSymbol} → ${best.destSymbol} (${best.sourceLender} → ${best.destLender})`)
+
+          try {
+            const forwarder = env.FORWARDER_ADDRESS as Address
+
+            // Read user's aToken balance to get exact withdraw amount for the quote
+            const withdrawLeaf = order.order.leaves[best.withdrawLeafIndex!]
+            const aToken = `0x${withdrawLeaf.data.slice(2, 42)}` as Address
+            const publicClient = createPublicClient({ chain: celo, transport: http(env.RPC_URL) })
+            const withdrawAmount = await publicClient.readContract({
+              address: aToken,
+              abi: erc20Abi,
+              functionName: 'balanceOf',
+              args: [order.signer as Address],
+            })
+            console.log(`  Withdraw amount: ${withdrawAmount} (aToken: ${aToken})`)
+
+            // Find the conversion index in settlementData that matches this swap
+            const sd = order.order.settlementData
+            const numConv = parseInt(sd.slice(2, 4), 16)
+            let conversionIndex = 0
+            for (let ci = 0; ci < numConv; ci++) {
+              const off = 4 + ci * 136
+              const cIn = ('0x' + sd.slice(off, off + 40)).toLowerCase()
+              const cOut = ('0x' + sd.slice(off + 40, off + 80)).toLowerCase()
+              if (cIn === best.sourceToken.toLowerCase() && cOut === best.destToken.toLowerCase()) {
+                conversionIndex = ci
+                break
+              }
+            }
+            console.log(`  Using conversion index: ${conversionIndex}`)
+
+            const swap = await buildFillerSwap({
+              assetIn: best.sourceToken,
+              assetOut: best.destToken,
+              amountIn: withdrawAmount,
+              conversionIndex,
+              chainId: env.CHAIN_ID,
+              slippageTolerance: 0.5,
+              forwarderAddress: forwarder,
+            }, { apiKey: env.UNISWAP_API_KEY })
+
+            built = buildCollateralSwapMigration(storedOrder, best, swap, verato, account.address)
+          } catch (swapErr) {
+            console.log(`  Uniswap quote failed: ${swapErr instanceof Error ? swapErr.message : swapErr}`)
+            // Fall back to collateral_only if available
+            if (collateralOnly) {
+              console.log(`  Falling back to collateral_only: ${collateralOnly.symbol} ${collateralOnly.sourceLender} → ${collateralOnly.destLender}`)
+              built = buildCollateralMigration(storedOrder, collateralOnly, verato, account.address)
+            } else {
+              console.log(`  No fallback available — skipping`)
+              built = { executionData: '0x' as Hex, fillerCalldata: '0x' as Hex }
+            }
+          }
+        }
+      }
+
+      executionData = built.executionData
+      fillerCalldata = built.fillerCalldata
+
+      if (executionData !== '0x') {
+        // Build calls: permits + pool approvals + settle with real executionData
+        const calls: Hex[] = []
+
+        for (const p of order.permits ?? []) {
+          const sig = p.signature
+          if (p.kind === 'ERC2612_PERMIT') {
+            calls.push(encodePermit({
+              token: p.targetAddress, owner: order.signer as Address, spender: verato,
+              value: maxUint256, deadline: BigInt(p.deadline), v: sig.v, r: sig.r, s: sig.s,
+            }))
+          } else if (p.kind === 'AAVE_DELEGATION') {
+            calls.push(encodeAaveDelegation({
+              debtToken: p.targetAddress, delegator: order.signer as Address, delegatee: verato,
+              value: maxUint256, deadline: BigInt(p.deadline), v: sig.v, r: sig.r, s: sig.s,
+            }))
+          } else if (p.kind === 'MORPHO_AUTHORIZATION') {
+            calls.push(encodeMorphoAuthorization({
+              morpho: p.targetAddress, authorizer: order.signer as Address, authorized: verato,
+              isAuthorized: true, nonce: BigInt(p.nonce), deadline: BigInt(p.deadline),
+              v: sig.v, r: sig.r, s: sig.s,
+            }))
+          }
+        }
+
+        // Approve tokens to destination pool
+        const depositLeaf = order.order.leaves[best.depositLeafIndex!]
+        if (depositLeaf) {
+          const pool = `0x${depositLeaf.data.slice(2, 42)}` as Address
+          const depositToken = best.type === 'collateral_only' ? best.token : best.destToken
+          calls.push(encodeApproveToken(depositToken, pool))
+        }
+
+        // For swaps, also approve the source token to the Uniswap router (via forwarder)
+        if (best.type === 'collateral_swap') {
+          // The forwarder handles approvals internally, but we need to approve
+          // the withdrawn token from Verato to the forwarder
+          const forwarder = env.FORWARDER_ADDRESS as Address
+          calls.push(encodeApproveToken(best.sourceToken, forwarder))
+        }
+
+        // Settle with our built executionData
+        calls.push(encodeSettle({
+          maxFeeBps: BigInt(order.order.maxFeeBps),
+          solver: order.order.solver,
+          minSolverReputation: BigInt(order.order.minSolverReputation),
+          deadline: order.order.deadline,
+          signature: order.signature,
+          orderData: order.order.orderData,
+          executionData,
+          fillerCalldata,
+        }))
+
+        const txHash = await walletClient.writeContract({
+          address: verato,
+          abi: multicallAbi,
+          functionName: 'multicall',
+          args: [calls],
+        })
+        return txHash
+      }
+    }
+  }
+
+  // Fallback: use the order's raw data (permits + approvals + settle)
   const calls = buildMulticallData(env, order, fillerCalldata)
 
-  // If there's only the settle call (no permits), call settle directly
-  // Otherwise use multicall to batch permits + approvals + settle
   if (calls.length === 1) {
     const txHash = await walletClient.writeContract({
-      address: env.VERATO_ADDRESS as Address,
+      address: verato,
       abi: veratoAbi,
       functionName: 'settle',
       args: [
@@ -353,7 +536,7 @@ async function executeSettlement(env: Env, order: OpenOrder, fillerCalldata: Hex
   }
 
   const txHash = await walletClient.writeContract({
-    address: env.VERATO_ADDRESS as Address,
+    address: verato,
     abi: multicallAbi,
     functionName: 'multicall',
     args: [calls],
