@@ -536,7 +536,7 @@ async function executeSettlement(env: Env, order: OpenOrder, _llmFillerCalldata:
         args: [order.signer as Address],
       })
       // Flash loan slightly more than debt to cover accrued interest
-      const flashLoanAmount = debtBalance * 1010n / 1000n
+      const flashLoanAmount = debtBalance * 1000001n / 1000000n
 
       const built = buildDebtMigration(storedOrder, best, verato, flashLoanAmount, account.address)
       executionData = built.executionData
